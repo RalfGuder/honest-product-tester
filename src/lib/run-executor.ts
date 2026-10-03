@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Type } from "@sinclair/typebox";
+import sharp from "sharp";
 import {
   AuthStorage,
   createAgentSession,
@@ -12,7 +14,17 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 import { getPersonaLogin, type BasicAuth, type PersonaLogin } from "@/lib/credentials";
+import type { Locale } from "@/i18n/config";
+import { renderLiveText, type LiveMessage } from "@/i18n/live";
+import { en, type Dictionary } from "@/i18n/dictionaries/en";
 import { getPersonas, type Persona } from "@/lib/personas";
+import { getDictionary } from "@/i18n/dictionaries";
+import { reportLanguageInstruction } from "@/lib/report-language";
+import {
+  buildCellReportMarkdown,
+  buildFailedReportMarkdown,
+  buildSummaryMarkdown,
+} from "@/lib/report-markdown";
 import {
   appendCellAction,
   appendCellObservation,
@@ -22,8 +34,19 @@ import {
   getScreenshotDir,
   updateCellRecord,
   updateRunManifest,
+  writeCellRawOutput,
   writeCellReport,
 } from "@/lib/runs";
+import { buildScrollScript, describeScroll, type ScrollResult } from "@/lib/browser-scroll";
+import { buildInspectScript, describeInspect, type InspectResult } from "@/lib/browser-inspect";
+import { buildFocusScript, toCropRegion, type FocusResult } from "@/lib/browser-zoom";
+import { createIdleWatchdog } from "@/lib/idle-watchdog";
+import {
+  buildRepairPrompt,
+  JSON_STRING_RULE,
+  parseWithRepair,
+  type ParseOutcome,
+} from "@/lib/report-parsing";
 import {
   REPORT_INSIGHT_DEFINITIONS,
   type PersonaReportInsight,
@@ -61,9 +84,21 @@ const PERSONA_MODEL_PROVIDER = "anthropic";
 const PERSONA_MODEL_ID = "claude-sonnet-4-5";
 const PERSONA_MODEL_FALLBACK_ID = "claude-opus-5-5";
 // Wall-clock budget per persona × scenario cell; afterwards browser tools refuse to run.
+// Grows with the step budget, so scenarios with many allowed actions get enough time.
 const CELL_TIMEOUT_MS = 10 * 60_000;
+const CELL_TIMEOUT_PER_STEP_MS = 20_000;
+
+function getCellTimeoutMs(maxSteps: number) {
+  return Math.max(CELL_TIMEOUT_MS, maxSteps * CELL_TIMEOUT_PER_STEP_MS);
+}
 // Time the persona gets to write its report after the budget ran out, before the session is aborted.
 const REPORT_GRACE_MS = 60_000;
+// browser_zoom enlarges the area around a text so tiny details (status dots, icons) survive
+// the downscaling the model applies to images.
+const ZOOM_FACTOR = 3;
+const ZOOM_DEFAULT_MARGIN = 120;
+// A session without any model output or tool activity for this long is considered hung.
+const IDLE_TIMEOUT_MS = 3 * 60_000;
 // Refused actions tolerated after the budget ran out, before the session is aborted.
 const MAX_BLOCKED_ACTIONS = 3;
 const activeRuns = globalThis.__honestProductTesterRuns ?? new Map<string, Promise<void>>();
@@ -102,7 +137,9 @@ async function executeRun(runId: string) {
 
   // Personas run in parallel; each persona works through its scenarios one after another.
   const results = await Promise.allSettled(
-    runPersonas.map((persona) => runPersonaScenarios(runId, manifest.url, persona, scenarios)),
+    runPersonas.map((persona) =>
+      runPersonaScenarios(runId, manifest.url, persona, scenarios, manifest.reportLanguage),
+    ),
   );
   const failures = results.filter(
     (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -131,12 +168,13 @@ async function runPersonaScenarios(
   url: string,
   persona: Persona,
   scenarios: Scenario[],
+  reportLanguage: Locale | undefined,
 ) {
   const errors: string[] = [];
 
   for (const scenario of scenarios.filter((item) => isPersonaAssigned(item, persona.id))) {
     try {
-      await runCell(runId, url, persona, scenario);
+      await runCell(runId, url, persona, scenario, reportLanguage);
     } catch (error) {
       errors.push(
         `${persona.name} / ${scenario.title}: ${error instanceof Error ? error.message : "unknown failure"}`,
@@ -149,25 +187,33 @@ async function runPersonaScenarios(
   }
 }
 
-async function runCell(runId: string, url: string, persona: Persona, scenario: Scenario) {
+async function runCell(
+  runId: string,
+  url: string,
+  persona: Persona,
+  scenario: Scenario,
+  reportLanguage: Locale | undefined,
+) {
   const cellId = getCellId(persona.id, scenario.id);
   const browserSession = getBrowserSessionName(runId, cellId);
   const isExplore = scenario.id === EXPLORE_SCENARIO_ID;
   const startUrl = resolveStartUrl(url, scenario.startPath);
   const reportTitle = isExplore ? persona.name : `${persona.name} – ${scenario.title}`;
+  // Report files are written in the run's report language; runs without one stay English.
+  const reportDictionary = getDictionary(reportLanguage ?? "en");
 
   await updateCellRecord(runId, cellId, (current) => ({
     ...current,
     status: "running",
     startedAt: current.startedAt ?? new Date().toISOString(),
-    summary: "Launching Pi session and browser tools.",
+    summary: { key: "launching" },
   }));
-  await appendCellObservation(runId, cellId, "Persona run started.");
+  await appendCellObservation(runId, cellId, { key: "runStarted" });
 
   const login = await resolveCellLogin(persona, scenario);
 
   if (login.skipReason) {
-    await skipCell(runId, cellId, scenario, reportTitle, login.skipReason);
+    await skipCell(runId, cellId, scenario, reportTitle, login.skipReason, reportDictionary);
     return;
   }
 
@@ -175,10 +221,12 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
   const budget = createStepBudget(scenario.maxSteps);
   const control = {
     timedOut: false,
+    idle: false,
     abortedByLimit: false,
     abort: () => {},
   };
-  let reportText = "";
+  // Text of the latest assistant message only; earlier commentary must not end up in the report.
+  let lastMessageText = "";
   let providerError: string | undefined;
 
   const tools = createBrowserTools({
@@ -208,7 +256,11 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
     void session.abort();
   };
 
+  // Started right before the first prompt, so a slow login does not count as idle time.
+  let watchdog: ReturnType<typeof createIdleWatchdog> | undefined;
+
   const unsubscribe = session.subscribe((event) => {
+    watchdog?.touch();
     void handleSessionEvent(runId, cellId, event);
     const eventProviderError = getProviderError(event);
 
@@ -217,33 +269,68 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
     }
 
     if (
+      event.type === "message_start" &&
+      "role" in event.message &&
+      event.message.role === "assistant"
+    ) {
+      lastMessageText = "";
+    }
+
+    if (
       event.type === "message_update" &&
       event.assistantMessageEvent.type === "text_delta"
     ) {
-      reportText += event.assistantMessageEvent.delta;
+      lastMessageText += event.assistantMessageEvent.delta;
     }
   });
+
+  const readReport = async <T>(parse: (text: string) => T) => {
+    const outcome = await parseWithRepair(lastMessageText, parse, async (errorMessage) => {
+      if (control.abortedByLimit) {
+        throw new Error("Session was stopped; no repair attempt.");
+      }
+
+      await session.prompt(buildRepairPrompt(errorMessage));
+      return lastMessageText;
+    });
+
+    await writeCellRawOutput(runId, cellId, outcome.attempts).catch(() => undefined);
+
+    return outcome;
+  };
 
   let graceTimer: NodeJS.Timeout | undefined;
   const timeoutTimer = setTimeout(() => {
     control.timedOut = true;
     graceTimer = setTimeout(control.abort, REPORT_GRACE_MS);
-  }, CELL_TIMEOUT_MS);
+  }, getCellTimeoutMs(scenario.maxSteps));
 
   try {
     if (login.value) {
       await updateCellRecord(runId, cellId, (current) => ({
         ...current,
-        summary: `Logging in as ${login.value?.username}.`,
+        summary: { key: "loggingIn", params: { username: login.value?.username ?? "" } },
       }));
       await loginPersona(browserSession, login.value);
-      await appendCellObservation(runId, cellId, `Logged in as ${login.value.username}.`);
+      await appendCellObservation(runId, cellId, {
+        key: "loggedIn",
+        params: { username: login.value.username },
+      });
     }
+
+    watchdog = createIdleWatchdog({
+      idleMs: IDLE_TIMEOUT_MS,
+      onIdle: () => {
+        control.idle = true;
+        control.abort();
+        void appendCellObservation(runId, cellId, idleMessage());
+      },
+    });
 
     await session.prompt(
       isExplore
-        ? buildPersonaPrompt(persona, startUrl, Boolean(login.value))
-        : buildMissionPrompt(persona, scenario, startUrl, Boolean(login.value)),
+        ? buildPersonaPrompt(persona, startUrl, Boolean(login.value), reportLanguage)
+        : buildMissionPrompt(persona, scenario, startUrl, Boolean(login.value), reportLanguage),
     );
 
     if (providerError && !control.abortedByLimit) {
@@ -251,14 +338,22 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
     }
 
     if (isExplore) {
-      const structuredSummary = parseStructuredSummary(reportText);
-      const finalReport = buildSummaryMarkdown(persona.name, structuredSummary);
+      const outcome = await readReport(parseStructuredSummary);
+
+      if (!outcome.ok) {
+        throw control.idle
+          ? new Error(renderLiveText(idleMessage(), en))
+          : unreadableReportError(outcome.error, cellId);
+      }
+
+      const structuredSummary = outcome.value;
+      const finalReport = buildSummaryMarkdown(reportDictionary, persona.name, structuredSummary);
 
       await updateCellRecord(runId, cellId, (current) => ({
         ...current,
         status: "completed",
         completedAt: new Date().toISOString(),
-        summary: "Finished browsing and captured structured feedback.",
+        summary: { key: "exploreFinished" },
         structuredSummary,
         finalReport,
       }));
@@ -269,25 +364,30 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
         budget,
         cellId,
         control,
-        reportText,
+        report: await readReport(parseCellReport),
         runId,
         scenario,
         screenshotDir,
       });
-      const finalReport = buildCellReportMarkdown(reportTitle, scenario, cellReport);
+      const finalReport = buildCellReportMarkdown(
+        reportDictionary,
+        reportTitle,
+        scenario.successCriteria,
+        cellReport,
+      );
 
       await updateCellRecord(runId, cellId, (current) => ({
         ...current,
         status: "completed",
         completedAt: new Date().toISOString(),
-        summary: `Scenario finished: ${cellReport.verdict}.`,
+        summary: { key: "scenarioFinished", params: { verdict: cellReport.verdict } },
         cellReport,
         finalReport,
       }));
       await writeCellReport(runId, cellId, finalReport);
     }
 
-    await appendCellObservation(runId, cellId, "Structured persona report written to disk.");
+    await appendCellObservation(runId, cellId, { key: "reportWritten" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown persona failure";
 
@@ -295,16 +395,21 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
       ...current,
       status: "failed",
       completedAt: new Date().toISOString(),
-      summary: "Persona run failed.",
+      summary: { key: "runFailed" },
       error: message,
       cellReport: isExplore
         ? undefined
         : buildFixedReport("error", scenario, budget.used, message),
     }));
-    await writeCellReport(runId, cellId, `# ${reportTitle}\n\nRun failed.\n\n${message}\n`);
+    await writeCellReport(
+      runId,
+      cellId,
+      buildFailedReportMarkdown(reportDictionary, reportTitle, message),
+    );
 
     throw error;
   } finally {
+    watchdog?.stop();
     clearTimeout(timeoutTimer);
     clearTimeout(graceTimer);
     unsubscribe();
@@ -316,7 +421,7 @@ async function runCell(runId: string, url: string, persona: Persona, scenario: S
 async function resolveCellLogin(
   persona: Persona,
   scenario: Scenario,
-): Promise<{ value?: PersonaLogin; skipReason?: string }> {
+): Promise<{ value?: PersonaLogin; skipReason?: LiveMessage }> {
   if (scenario.login === "anonymous") {
     return {};
   }
@@ -328,10 +433,13 @@ async function resolveCellLogin(
   try {
     const value = await getPersonaLogin(persona.id);
 
-    return value ? { value } : { skipReason: "Scenario requires a login, but no credentials file exists." };
+    return value ? { value } : { skipReason: { key: "loginRequiredNoFile" } };
   } catch (error) {
     return {
-      skipReason: `Scenario requires a login: ${error instanceof Error ? error.message : "no credentials"}`,
+      skipReason: {
+        key: "loginRequiredError",
+        params: { error: error instanceof Error ? error.message : "no credentials" },
+      },
     };
   }
 }
@@ -341,9 +449,13 @@ async function skipCell(
   cellId: string,
   scenario: Scenario,
   reportTitle: string,
-  reason: string,
+  reason: LiveMessage,
+  reportDictionary: Dictionary,
 ) {
-  const cellReport = buildFixedReport("skipped", scenario, 0, reason);
+  const cellReport = {
+    ...buildFixedReport("skipped", scenario, 0, renderLiveText(reason, en)),
+    noteMessage: reason,
+  };
 
   await updateCellRecord(runId, cellId, (current) => ({
     ...current,
@@ -352,8 +464,12 @@ async function skipCell(
     summary: reason,
     cellReport,
   }));
-  await appendCellObservation(runId, cellId, `Skipped: ${reason}`);
-  await writeCellReport(runId, cellId, buildCellReportMarkdown(reportTitle, scenario, cellReport));
+  await appendCellObservation(runId, cellId, reason);
+  await writeCellReport(
+    runId,
+    cellId,
+    buildCellReportMarkdown(reportDictionary, reportTitle, scenario.successCriteria, cellReport),
+  );
 }
 
 function buildFixedReport(
@@ -380,7 +496,7 @@ async function evaluateMission({
   budget,
   cellId,
   control,
-  reportText,
+  report,
   runId,
   scenario,
   screenshotDir,
@@ -388,29 +504,35 @@ async function evaluateMission({
   browserSession: string;
   budget: StepBudget;
   cellId: string;
-  control: { timedOut: boolean; abortedByLimit: boolean };
-  reportText: string;
+  control: { timedOut: boolean; idle: boolean; abortedByLimit: boolean };
+  report: ParseOutcome<ParsedCellReport>;
   runId: string;
   scenario: Scenario;
   screenshotDir: string;
 }): Promise<CellReport> {
   const limitHit = budget.exhausted || control.timedOut || control.abortedByLimit;
-  let parsed: ParsedCellReport;
+  let parsed: ParsedCellReport | undefined = report.ok ? report.value : undefined;
 
-  try {
-    parsed = parseCellReport(reportText);
-  } catch (error) {
-    if (!limitHit) {
-      throw error;
-    }
-
+  if (!report.ok && limitHit) {
     // The persona ran out of budget before it could write a report.
     parsed = { selfVerdict: "limit_reached", evidence: {}, frictionPoints: [], quote: "" };
   }
 
+  // Without a readable report only the assertions can still judge the outcome.
+  if (!report.ok && !parsed && scenario.assertions.length === 0) {
+    throw unreadableReportError(report.error, cellId);
+  }
+
   const finalUrl = await readCurrentUrl(browserSession).catch(() => undefined);
   const assertionResults = await checkAssertions(browserSession, scenario.assertions, finalUrl);
-  const { verdict, misjudged } = reconcileVerdict(parsed.selfVerdict, assertionResults);
+  const { verdict, misjudged } = parsed
+    ? reconcileVerdict(parsed.selfVerdict, assertionResults)
+    : {
+        verdict: assertionResults.every((result) => result.passed)
+          ? ("passed" as const)
+          : ("failed" as const),
+        misjudged: false,
+      };
 
   await captureFinalScreenshot(runId, cellId, browserSession, screenshotDir).catch(
     () => undefined,
@@ -418,20 +540,48 @@ async function evaluateMission({
 
   return {
     verdict,
-    selfVerdict: parsed.selfVerdict,
+    selfVerdict: parsed?.selfVerdict,
     misjudged,
-    evidence: { ...parsed.evidence, finalUrl: parsed.evidence.finalUrl ?? finalUrl },
+    evidence: { ...parsed?.evidence, finalUrl: parsed?.evidence.finalUrl ?? finalUrl },
     stepsUsed: budget.used,
     maxSteps: scenario.maxSteps,
-    frictionPoints: parsed.frictionPoints,
-    quote: parsed.quote,
+    frictionPoints: parsed?.frictionPoints ?? [],
+    quote: parsed?.quote ?? "",
     assertionResults,
-    note: control.timedOut
-      ? `Time budget of ${CELL_TIMEOUT_MS / 60_000} minutes ran out.`
-      : budget.exhausted
-        ? `Step budget of ${scenario.maxSteps} browser actions was used up.`
-        : undefined,
+    ...(parsed
+      ? budgetNote(control, budget.exhausted, scenario.maxSteps)
+      : liveNote({ key: "reportUnreadable" })),
   };
+}
+
+function unreadableReportError(error: Error, cellId: string) {
+  return new Error(
+    `Persona report was not valid JSON, even after one repair attempt: ${error.message} (raw output: cells/${cellId}.raw.txt)`,
+  );
+}
+
+function liveNote(noteMessage: LiveMessage) {
+  return { note: renderLiveText(noteMessage, en), noteMessage };
+}
+
+function idleMessage(): LiveMessage {
+  return { key: "idleStopped", params: { minutes: IDLE_TIMEOUT_MS / 60_000 } };
+}
+
+function budgetNote(
+  control: { timedOut: boolean; idle: boolean },
+  stepsExhausted: boolean,
+  maxSteps: number,
+) {
+  const noteMessage: LiveMessage | undefined = control.idle
+    ? idleMessage()
+    : control.timedOut
+    ? { key: "timeBudgetUsed", params: { minutes: Math.round(getCellTimeoutMs(maxSteps) / 60_000) } }
+    : stepsExhausted
+      ? { key: "stepBudgetUsed", params: { steps: maxSteps } }
+      : undefined;
+
+  return noteMessage ? liveNote(noteMessage) : {};
 }
 
 async function readCurrentUrl(browserSession: string) {
@@ -452,7 +602,7 @@ async function checkAssertions(
       results.push({
         ...assertion,
         passed: Boolean(finalUrl?.includes(assertion.value)),
-        detail: finalUrl ? `Final URL: ${finalUrl}` : "Final URL could not be read.",
+        detail: finalUrl,
       });
       continue;
     }
@@ -503,16 +653,17 @@ async function handleSessionEvent(
   if (event.type === "tool_execution_start") {
     await updateCellRecord(runId, cellId, (current) => ({
       ...current,
-      summary: `Running ${event.toolName}...`,
+      summary: { key: "toolRunning", params: { tool: event.toolName } },
     }));
   }
 
   if (event.type === "tool_execution_end") {
     await updateCellRecord(runId, cellId, (current) => ({
       ...current,
-      summary: event.isError
-        ? `${event.toolName} failed.`
-        : `${event.toolName} completed.`,
+      summary: {
+        key: event.isError ? "toolFailed" : "toolCompleted",
+        params: { tool: event.toolName },
+      },
     }));
   }
 }
@@ -538,8 +689,13 @@ function createBrowserTools({
   screenshotDir: string;
 }) {
   // Actions change the page and count against the step budget; reads are free.
-  const runTool = async (name: string, args: string[], { isAction = false } = {}) => {
-    const input = args.join(" ");
+  const runTool = async (
+    name: string,
+    args: string[],
+    { isAction = false, display }: { isAction?: boolean; display?: string } = {},
+  ) => {
+    // `display` replaces long generated arguments (e.g. scripts) in the action log.
+    const input = display ?? args.join(" ");
 
     if (control.timedOut) {
       throw new Error(TIME_UP_MESSAGE);
@@ -550,7 +706,10 @@ function createBrowserTools({
         control.abort();
       }
 
-      await appendCellObservation(runId, cellId, `${name} refused: step budget exhausted.`);
+      await appendCellObservation(runId, cellId, {
+        key: "stepBudgetRefused",
+        params: { tool: name },
+      });
       throw new Error(STEP_LIMIT_MESSAGE);
     }
 
@@ -580,7 +739,10 @@ function createBrowserTools({
         input,
         outcome: "error",
       });
-      await appendCellObservation(runId, cellId, `${name} error: ${message}`);
+      await appendCellObservation(runId, cellId, {
+        key: "toolError",
+        params: { tool: name, error: message },
+      });
 
       throw error;
     }
@@ -664,24 +826,34 @@ function createBrowserTools({
     defineTool({
       name: "browser_scroll",
       label: "Browser Scroll",
-      description: "Scroll the page up or down.",
+      description:
+        "Scroll up or down. Scrolls the page; if the page cannot move, it scrolls the largest visible scrollable area instead (e.g. a dialog or list). The result says what moved and whether its end is reached.",
       parameters: Type.Object({
         direction: Type.Union([Type.Literal("up"), Type.Literal("down")]),
         pixels: Type.Optional(Type.Number({ description: "Number of pixels to scroll" })),
+        withinText: Type.Optional(
+          Type.String({
+            description:
+              "Text currently visible inside the list or panel you want to scroll, e.g. a name in a member list. Scrolls that area instead of the page.",
+          }),
+        ),
       }),
-      execute: async (_toolCallId, params) => ({
-        content: [
+      execute: async (_toolCallId, params) => {
+        const pixels = Math.abs(params.pixels ?? 700) * (params.direction === "up" ? -1 : 1);
+        const output = await runTool(
+          "browser_scroll",
+          ["eval", buildScrollScript(pixels, params.withinText)],
           {
-            type: "text",
-            text: await runTool(
-              "browser_scroll",
-              ["scroll", params.direction, `${params.pixels ?? 700}`],
-              action,
-            ),
+            ...action,
+            display: `${params.direction} ${Math.abs(pixels)}${params.withinText ? ` within "${params.withinText}"` : ""}`,
           },
-        ],
-        details: {},
-      }),
+        );
+
+        return {
+          content: [{ type: "text", text: describeScroll(parseEvalJson(output), params.direction) }],
+          details: {},
+        };
+      },
     }),
     defineTool({
       name: "browser_wait",
@@ -700,7 +872,8 @@ function createBrowserTools({
     defineTool({
       name: "browser_screenshot",
       label: "Browser Screenshot",
-      description: "Capture a screenshot and save it into the run directory.",
+      description:
+        "Capture a screenshot of the visible page. You receive the image, so use it whenever visual details matter (colors, icons, status dots, layout).",
       parameters: Type.Object({
         label: Type.String({ description: "Short screenshot label" }),
       }),
@@ -718,11 +891,113 @@ function createBrowserTools({
           ...current,
           latestScreenshotFileName: fileName,
           latestScreenshotTakenAt: screenshotTakenAt,
-          summary: `Captured screenshot: ${params.label}`,
+          summary: { key: "screenshotCaptured", params: { label: params.label } },
+        }));
+
+        // Hand the image to the model too, so the persona can judge what the snapshot cannot
+        // express (colors, icons, status indicators).
+        const image = await readFile(screenshotPath).catch(() => undefined);
+
+        return {
+          content: [
+            { type: "text", text: `${output}\nSaved to ${screenshotPath}` },
+            ...(image
+              ? [{ type: "image" as const, data: image.toString("base64"), mimeType: "image/png" }]
+              : []),
+          ],
+          details: {},
+        };
+      },
+    }),
+    defineTool({
+      name: "browser_zoom",
+      label: "Browser Zoom",
+      description: `Look closely at a small part of the visible page: finds the given visible text (e.g. a person's name) and returns an image of the area around it, enlarged ${ZOOM_FACTOR}x. Use it for tiny details next to that text, such as status dots on profile pictures or small icons.`,
+      parameters: Type.Object({
+        text: Type.String({ description: "Visible text to zoom in on, e.g. \"Person 14\"" }),
+        margin: Type.Optional(
+          Type.Number({
+            description: `Pixels of surrounding area to include on each side (default ${ZOOM_DEFAULT_MARGIN}).`,
+          }),
+        ),
+      }),
+      execute: async (_toolCallId, params) => {
+        const output = await runTool("browser_zoom", ["eval", buildFocusScript(params.text)], {
+          display: `"${params.text}"`,
+        });
+        const focus = parseEvalJson<FocusResult>(output);
+        const region =
+          focus.found && focus.rect && focus.viewport
+            ? toCropRegion(
+                focus.rect,
+                Math.max(20, params.margin ?? ZOOM_DEFAULT_MARGIN),
+                focus.viewport,
+                focus.devicePixelRatio ?? 1,
+              )
+            : undefined;
+
+        if (!region) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `"${params.text}" is not visible on the screen right now. Scroll it into view first.`,
+              },
+            ],
+            details: {},
+          };
+        }
+
+        const fileName = `${cellId}-${Date.now()}-zoom.png`;
+        const screenshotPath = path.join(screenshotDir, fileName);
+
+        await runTool("browser_zoom", ["screenshot", screenshotPath], {
+          display: `screenshot for "${params.text}"`,
+        });
+
+        const zoomed = await sharp(screenshotPath)
+          .extract(region)
+          .resize({ width: region.width * ZOOM_FACTOR, kernel: "nearest" })
+          .png()
+          .toBuffer();
+
+        await sharp(zoomed).toFile(screenshotPath);
+        await updateCellRecord(runId, cellId, (current) => ({
+          ...current,
+          latestScreenshotFileName: fileName,
+          latestScreenshotTakenAt: new Date().toISOString(),
+          summary: { key: "screenshotCaptured", params: { label: `zoom: ${params.text}` } },
         }));
 
         return {
-          content: [{ type: "text", text: `${output}\nSaved to ${screenshotPath}` }],
+          content: [
+            { type: "text", text: `Area around "${params.text}", enlarged ${ZOOM_FACTOR}x.` },
+            { type: "image", data: zoomed.toString("base64"), mimeType: "image/png" },
+          ],
+          details: {},
+        };
+      },
+    }),
+    defineTool({
+      name: "browser_inspect",
+      label: "Browser Inspect",
+      description:
+        "Read the HTML markup around a visible text (e.g. a person's name), reduced to tags, classes and descriptive attributes. Reveals state that the snapshot does not show, such as status indicators inside avatars (look for class names like 'presence', 'online', 'away', 'active').",
+      parameters: Type.Object({
+        text: Type.String({ description: "Visible text to inspect, e.g. \"Person 14\"" }),
+      }),
+      execute: async (_toolCallId, params) => {
+        const output = await runTool("browser_inspect", ["eval", buildInspectScript(params.text)], {
+          display: `"${params.text}"`,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: describeInspect(params.text, parseEvalJson<InspectResult>(output)),
+            },
+          ],
           details: {},
         };
       },
@@ -753,7 +1028,12 @@ function createBrowserTools({
 const LOGGED_IN_NOTE =
   "\nYou are already logged in with your own test account. Do not log out or change account settings.\n";
 
-function buildPersonaPrompt(persona: Persona, url: string, loggedIn: boolean) {
+function buildPersonaPrompt(
+  persona: Persona,
+  url: string,
+  loggedIn: boolean,
+  reportLanguage: Locale | undefined,
+) {
   const outputSchema = REPORT_INSIGHT_DEFINITIONS.map(
     ({ id, question }) => `  "${id}": "${question}"`,
   ).join("\n");
@@ -771,7 +1051,9 @@ Constraints:
 - You have the same fixed time budget as every other persona.
 - No destructive actions, purchases, or final form submissions.
 - Use browser_snapshot whenever you need to decide what to click next.
-- Use browser_screenshot when something is notably good, bad, or confusing.
+- Lists, dialogs and sidebars often scroll on their own and show only part of their content. When you need to see all entries, keep scrolling (use withinText for a specific list) until browser_scroll reports that the end is reached.
+- Use browser_screenshot when something is notably good, bad, or confusing, or when you need to see visual details such as colors, icons, or status dots. You receive the screenshot as an image.
+- Small details (status dots, tiny icons) are easy to miss on a full screenshot. Use browser_zoom with a visible text next to them, e.g. a person's name, to look closely, or browser_inspect to read the markup around that text.
 - If a page is slow or broken, mention that in the relevant answer.
 
 When you are done, return only valid JSON in this exact shape:
@@ -786,6 +1068,8 @@ Rules for the answers:
 - Do not repeat the question inside the answer.
 - Be concrete about what you clicked, what happened, and what this persona wanted but did not get.
 - Do not include markdown, commentary, code fences, or extra keys.
+${JSON_STRING_RULE}
+${reportLanguageInstruction(reportLanguage)}
 `.trim();
 }
 
@@ -799,6 +1083,7 @@ function buildMissionPrompt(
   scenario: Scenario,
   url: string,
   loggedIn: boolean,
+  reportLanguage: Locale | undefined,
 ) {
   return `
 ${persona.prompt}
@@ -819,7 +1104,9 @@ Constraints:
 - There is also a fixed time budget. When time is up, tools fail; then stop and report.
 ${scenario.allowSubmit ? SUBMIT_ALLOWED_RULE : SUBMIT_FORBIDDEN_RULE}
 - Use browser_snapshot whenever you need to decide what to click next.
-- Use browser_screenshot when something is notably good, bad, or confusing.
+- Lists, dialogs and sidebars often scroll on their own and show only part of their content. When you need to see all entries, keep scrolling (use withinText for a specific list) until browser_scroll reports that the end is reached.
+- Use browser_screenshot when something is notably good, bad, or confusing, or when you need to see visual details such as colors, icons, or status dots. You receive the screenshot as an image.
+- Small details (status dots, tiny icons) are easy to miss on a full screenshot. Use browser_zoom with a visible text next to them, e.g. a person's name, to look closely, or browser_inspect to read the markup around that text.
 
 When you are done, return only valid JSON in this exact shape:
 
@@ -839,57 +1126,9 @@ Verdict rules:
 - "gave_up" if this persona would stop trying.
 - "limit_reached" if the step or time budget ran out first.
 Do not include markdown, commentary, code fences, or extra keys.
+${JSON_STRING_RULE}
+${reportLanguageInstruction(reportLanguage)}
 `.trim();
-}
-
-const VERDICT_LABELS: Record<CellReport["verdict"], string> = {
-  passed: "Passed",
-  failed: "Failed",
-  gave_up: "Gave up",
-  limit_reached: "Limit reached",
-  error: "Error",
-  skipped: "Skipped",
-};
-
-function buildCellReportMarkdown(title: string, scenario: Scenario, report: CellReport) {
-  const lines = [
-    `# ${title}`,
-    "",
-    `- **Verdict:** ${VERDICT_LABELS[report.verdict]}${report.misjudged ? ` (persona said: ${report.selfVerdict})` : ""}`,
-    `- **Steps:** ${report.stepsUsed} / ${report.maxSteps}`,
-    `- **Success criterion:** ${scenario.successCriteria}`,
-  ];
-
-  if (report.quote) {
-    lines.push(`- **Quote:** "${report.quote}"`);
-  }
-
-  if (report.evidence.finalUrl || report.evidence.quote) {
-    lines.push(
-      `- **Evidence:** ${[report.evidence.finalUrl, report.evidence.quote && `"${report.evidence.quote}"`].filter(Boolean).join(" – ")}`,
-    );
-  }
-
-  if (report.note) {
-    lines.push(`- **Note:** ${report.note}`);
-  }
-
-  if (report.frictionPoints.length > 0) {
-    lines.push("", "## Friction points", "", ...report.frictionPoints.map((item) => `- ${item}`));
-  }
-
-  if (report.assertionResults.length > 0) {
-    lines.push(
-      "",
-      "## Assertions",
-      "",
-      ...report.assertionResults.map(
-        (result) => `- ${result.passed ? "✅" : "❌"} ${result.type}: ${result.value}`,
-      ),
-    );
-  }
-
-  return `${lines.join("\n")}\n`;
 }
 
 function parseStructuredSummary(rawText: string): PersonaReportInsight[] {
@@ -962,21 +1201,15 @@ function extractJsonObject(rawText: string) {
   return rawText.slice(firstBrace, lastBrace + 1);
 }
 
-function buildSummaryMarkdown(
-  personaName: string,
-  structuredSummary: PersonaReportInsight[],
-) {
-  const bullets = REPORT_INSIGHT_DEFINITIONS.map(({ id, title }) => {
-    const insight = structuredSummary.find((item) => item.id === id);
+// agent-browser prints string results JSON-quoted, so the payload may be encoded twice.
+function parseEvalJson<T = ScrollResult>(stdout: string): T {
+  let parsed: unknown = JSON.parse(stdout.trim());
 
-    if (!insight) {
-      throw new Error(`Missing structured insight for "${id}".`);
-    }
+  if (typeof parsed === "string") {
+    parsed = JSON.parse(parsed);
+  }
 
-    return `- **${title}:** ${insight.answer}`;
-  }).join("\n");
-
-  return `# ${personaName}\n\n${bullets}\n`;
+  return parsed as T;
 }
 
 function getBrowserSessionName(runId: string, cellId: string) {

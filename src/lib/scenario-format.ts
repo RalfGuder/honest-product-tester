@@ -15,6 +15,27 @@ import {
 
 export * from "@/lib/scenario-model";
 
+export type ScenarioErrorCode =
+  | "titleRequired"
+  | "missionRequired"
+  | "successCriteriaRequired"
+  | "titleWithoutSlug"
+  | "reservedId"
+  | "invalidHost"
+  | "alreadyExists";
+
+/** A user-facing validation error; the UI translates it by `code`. The message stays English. */
+export class ScenarioValidationError extends Error {
+  constructor(
+    readonly code: ScenarioErrorCode,
+    message: string,
+    readonly params: Record<string, string> = {},
+  ) {
+    super(message);
+    this.name = "ScenarioValidationError";
+  }
+}
+
 type ScenarioFrontmatter = {
   id?: unknown;
   title?: unknown;
@@ -84,25 +105,35 @@ export function scenarioFromForm(formData: FormData): Scenario {
   const successCriteria = formText(formData, "successCriteria");
 
   if (!title) {
-    throw new Error("Please enter a title.");
+    throw new ScenarioValidationError("titleRequired", "Please enter a title.");
   }
 
   if (!mission) {
-    throw new Error("Please describe the mission.");
+    throw new ScenarioValidationError("missionRequired", "Please describe the mission.");
   }
 
   if (!successCriteria) {
-    throw new Error("Please describe the success criterion.");
+    throw new ScenarioValidationError(
+      "successCriteriaRequired",
+      "Please describe the success criterion.",
+    );
   }
 
   const id = formText(formData, "id") || slugify(title);
 
   if (!id) {
-    throw new Error("The title must contain at least one letter or digit.");
+    throw new ScenarioValidationError(
+      "titleWithoutSlug",
+      "The title must contain at least one letter or digit.",
+    );
   }
 
   if (id === EXPLORE_SCENARIO_ID) {
-    throw new Error(`"${EXPLORE_SCENARIO_ID}" is reserved for the built-in free exploration.`);
+    throw new ScenarioValidationError(
+      "reservedId",
+      `"${EXPLORE_SCENARIO_ID}" is reserved for the built-in free exploration.`,
+      { id: EXPLORE_SCENARIO_ID },
+    );
   }
 
   const assertionTypes = formData.getAll("assertionType").map(String);
@@ -139,7 +170,7 @@ function normalizeHost(value: string) {
   try {
     return new URL(value.includes("://") ? value : `https://${value}`).hostname.toLowerCase();
   } catch {
-    throw new Error(`"${value}" is not a valid host.`);
+    throw new ScenarioValidationError("invalidHost", `"${value}" is not a valid host.`, { value });
   }
 }
 

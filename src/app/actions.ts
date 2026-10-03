@@ -2,6 +2,8 @@
 
 import { redirect } from "next/navigation";
 
+import { isLocale } from "@/i18n/config";
+import { getLocale } from "@/i18n/server";
 import { getPersonas } from "@/lib/personas";
 import { ensureRunStarted } from "@/lib/run-executor";
 import { createRun } from "@/lib/runs";
@@ -16,7 +18,9 @@ export async function startRunAction(formData: FormData) {
   const scenarios = (
     await Promise.all(formData.getAll("scenario").map((id) => getScenario(String(id))))
   ).filter((scenario): scenario is Scenario => Boolean(scenario));
-  const run = await createRun(url, personas, scenarios);
+  const reportLanguageValue = formData.get("reportLanguage");
+  const reportLanguage = isLocale(reportLanguageValue) ? reportLanguageValue : await getLocale();
+  const run = await createRun(url, personas, scenarios, reportLanguage);
   ensureRunStarted(run.id);
 
   redirect(`/runs/${run.id}`);

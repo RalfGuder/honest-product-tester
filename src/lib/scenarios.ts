@@ -5,6 +5,7 @@ import {
   EXPLORE_SCENARIO,
   EXPLORE_SCENARIO_ID,
   parseScenario,
+  ScenarioValidationError,
   serializeScenario,
   type Scenario,
 } from "@/lib/scenario-format";
@@ -68,7 +69,11 @@ export async function saveScenario(scenario: Scenario, { mustBeNew = false } = {
       flag: mustBeNew ? "wx" : "w",
     }).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "EEXIST") {
-        throw new Error(`A scenario with the id "${scenario.id}" already exists.`);
+        throw new ScenarioValidationError(
+          "alreadyExists",
+          `A scenario with the id "${scenario.id}" already exists.`,
+          { id: scenario.id },
+        );
       }
 
       throw error;
