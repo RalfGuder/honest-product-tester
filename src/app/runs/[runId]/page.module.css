@@ -790,3 +790,11 @@
   padding: 2px 8px;
   color: #9a9a9a;
 }
+
+/* Report, screenshot and timeline stack inside the scrolling card; none of them may shrink,
+   otherwise they overlap. */
+.panelBody > .reportBlock,
+.panelBody > .subsection,
+.panelBody > .errorBox {
+  flex-shrink: 0;
+}

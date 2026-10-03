@@ -2,26 +2,17 @@
 
 import { useActionState, useState } from "react";
 
+import { useI18n } from "@/i18n/provider";
 import {
   DEFAULT_MAX_STEPS,
   MAX_STEPS_LIMIT,
   SCENARIO_ASSERTION_TYPES,
+  SCENARIO_LOGIN_MODES,
   type Scenario,
   type ScenarioAssertion,
 } from "@/lib/scenario-model";
 import { saveScenarioAction, type ScenarioFormState } from "./actions";
 import styles from "./scenarios.module.css";
-
-const LOGIN_OPTIONS = [
-  { value: "auto", label: "Auto – log in when the tester has credentials" },
-  { value: "required", label: "Required – skip testers without credentials" },
-  { value: "anonymous", label: "Anonymous – never log in" },
-] as const;
-
-const ASSERTION_LABELS: Record<ScenarioAssertion["type"], string> = {
-  url_contains: "Final URL contains",
-  text_visible: "Page shows text",
-};
 
 const initialState: ScenarioFormState = { attempt: 0 };
 
@@ -31,6 +22,7 @@ type ScenarioFormProps = {
 };
 
 export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
+  const { t, format } = useI18n();
   const [state, formAction, pending] = useActionState(saveScenarioAction, initialState);
   const [assignedPersonas, setAssignedPersonas] = useState<Set<string>>(
     () => new Set(scenario?.personas ?? []),
@@ -48,63 +40,63 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
       {scenario ? <input type="hidden" name="id" value={scenario.id} /> : null}
 
       <label className={styles.field}>
-        <span>Title</span>
+        <span>{t.scenarioForm.title}</span>
         <input name="title" defaultValue={value("title")} required maxLength={120} />
-        {scenario ? <small>ID: {scenario.id} (stays the same when the title changes)</small> : null}
+        {scenario ? <small>{format(t.scenarioForm.idHint, { id: scenario.id })}</small> : null}
       </label>
 
       <label className={styles.field}>
-        <span>Mission</span>
+        <span>{t.scenarioForm.mission}</span>
         <textarea
           name="mission"
           defaultValue={value("mission")}
           required
           rows={5}
-          placeholder="You want to find a recipe for dinner and save it for later."
+          placeholder={t.scenarioForm.missionPlaceholder}
         />
-        <small>Written to the tester. Describe the goal, not the clicks.</small>
+        <small>{t.scenarioForm.missionHint}</small>
       </label>
 
       <label className={styles.field}>
-        <span>Success criterion</span>
+        <span>{t.scenarioForm.successCriteria}</span>
         <input
           name="successCriteria"
           defaultValue={value("successCriteria")}
           required
-          placeholder="The recipe appears in the favorites list"
+          placeholder={t.scenarioForm.successCriteriaPlaceholder}
         />
       </label>
 
       <div className={styles.fieldRow}>
         <label className={styles.field}>
-          <span>Target host (optional)</span>
+          <span>{t.scenarioForm.targetHost}</span>
           <input
             name="targetHost"
             defaultValue={value("targetHost")}
             placeholder="shop.example.com"
           />
-          <small>Shown first when the run URL is on this host. Empty = any site.</small>
+          <small>{t.scenarioForm.targetHostHint}</small>
         </label>
         <label className={styles.field}>
-          <span>Start path (optional)</span>
+          <span>{t.scenarioForm.startPath}</span>
           <input name="startPath" defaultValue={value("startPath")} placeholder="/recipes" />
-          <small>Relative to the run URL&apos;s origin.</small>
+          <small>{t.scenarioForm.startPathHint}</small>
         </label>
       </div>
 
       <div className={styles.fieldRow}>
         <label className={styles.field}>
-          <span>Login</span>
+          <span>{t.scenarioForm.login}</span>
           <select name="login" defaultValue={value("login") ?? "auto"}>
-            {LOGIN_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
+            {SCENARIO_LOGIN_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {t.scenarioForm.loginOptions[mode]}
               </option>
             ))}
           </select>
         </label>
         <label className={styles.field}>
-          <span>Max browser actions</span>
+          <span>{t.scenarioForm.maxSteps}</span>
           <input
             name="maxSteps"
             type="number"
@@ -116,11 +108,11 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
       </div>
 
       <fieldset className={styles.assertions}>
-        <legend>Assigned testers</legend>
+        <legend>{t.scenarioForm.assignedTesters}</legend>
         <p className={styles.hint}>
           {assignedPersonas.size === 0
-            ? "No tester selected: every tester works through this scenario."
-            : "Only the selected testers work through this scenario."}
+            ? t.scenarioForm.assignedAll
+            : t.scenarioForm.assignedSome}
         </p>
         <div className={styles.personaChoices}>
           {personas.map((persona) => (
@@ -159,21 +151,15 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
           checked={allowSubmit}
           onChange={(event) => setAllowSubmit(event.target.checked)}
         />
-        <span>Allow submitting forms</span>
+        <span>{t.scenarioForm.allowSubmit}</span>
       </label>
       {allowSubmit ? (
-        <p className={styles.warning}>
-          Testers will really submit forms on the target site. Only use this against staging or
-          test environments. Purchases, payments, deleting data and account changes stay
-          forbidden.
-        </p>
+        <p className={styles.warning}>{t.scenarioForm.allowSubmitWarning}</p>
       ) : null}
 
       <fieldset className={styles.assertions}>
-        <legend>Assertions (optional)</legend>
-        <p className={styles.hint}>
-          Checked by code after the tester finishes. They override the tester&apos;s own verdict.
-        </p>
+        <legend>{t.scenarioForm.assertions}</legend>
+        <p className={styles.hint}>{t.scenarioForm.assertionsHint}</p>
         {assertions.map((assertion, index) => (
           <div key={index} className={styles.assertionRow}>
             <select
@@ -191,7 +177,7 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
             >
               {SCENARIO_ASSERTION_TYPES.map((type) => (
                 <option key={type} value={type}>
-                  {ASSERTION_LABELS[type]}
+                  {t.scenarioForm.assertionTypes[type]}
                 </option>
               ))}
             </select>
@@ -214,7 +200,7 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
                 setAssertions((current) => current.filter((_, itemIndex) => itemIndex !== index))
               }
             >
-              Remove
+              {t.scenarioForm.remove}
             </button>
           </div>
         ))}
@@ -225,7 +211,7 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
             setAssertions((current) => [...current, { type: "url_contains", value: "" }])
           }
         >
-          Add assertion
+          {t.scenarioForm.addAssertion}
         </button>
       </fieldset>
 
@@ -233,7 +219,7 @@ export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
 
       <div className={styles.actions}>
         <button type="submit" className={styles.primaryButton} disabled={pending}>
-          {pending ? "Saving…" : "Save scenario"}
+          {pending ? t.scenarioForm.saving : t.scenarioForm.save}
         </button>
       </div>
     </form>

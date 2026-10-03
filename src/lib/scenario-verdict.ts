@@ -1,3 +1,4 @@
+import type { LiveMessage } from "@/i18n/live";
 import type { ScenarioAssertion } from "@/lib/scenario-format";
 
 export const VERDICTS = [
@@ -42,7 +43,9 @@ export type CellReport = {
   frictionPoints: string[];
   quote: string;
   assertionResults: AssertionResult[];
+  // English note for the Markdown report; noteMessage is its translatable form for the UI.
   note?: string;
+  noteMessage?: LiveMessage;
 };
 
 /**

@@ -3,8 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { getI18n } from "@/i18n/server";
 import { getPersonas } from "@/lib/personas";
-import { scenarioFromForm } from "@/lib/scenario-format";
+import { scenarioFromForm, ScenarioValidationError } from "@/lib/scenario-format";
 import { deleteScenario, saveScenario } from "@/lib/scenarios";
 
 export type ScenarioFormState = {
@@ -31,8 +32,13 @@ export async function saveScenarioAction(
       { mustBeNew: isNew },
     );
   } catch (error) {
+    const { t, format } = await getI18n();
+
     return {
-      error: error instanceof Error ? error.message : "Saving the scenario failed.",
+      error:
+        error instanceof ScenarioValidationError
+          ? format(t.errors[error.code], error.params)
+          : t.errors.saveFailed,
       values: Object.fromEntries(
         TEXT_FIELDS.map((field) => [field, String(formData.get(field) ?? "")]),
       ),

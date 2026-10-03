@@ -3,14 +3,19 @@
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
-import type { Persona } from "@/lib/personas";
+import { useI18n } from "@/i18n/provider";
+import type { LocalizedPersona as Persona } from "@/lib/personas";
 import styles from "./page.module.css";
 
 type HomeClientProps = {
   personas: Persona[];
 };
 
-function getPersonaSummary(persona: Persona) {
+function getPersonaSummary(persona: Persona, fallback: string) {
+  if (persona.summary) {
+    return persona.summary;
+  }
+
   const firstLine = persona.prompt.split("\n")[0]?.trim() ?? "";
   const prefix = `You are ${persona.name}, `;
 
@@ -18,11 +23,12 @@ function getPersonaSummary(persona: Persona) {
     return firstLine.slice(prefix.length).replace(/\.$/, "");
   }
 
-  return `${persona.voice.toLowerCase()} persona focused on clear feedback`;
+  return fallback;
 }
 
 export function HomeClient({ personas }: HomeClientProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
+  const { t, format } = useI18n();
 
   useEffect(() => {
     if (!selectedPersona) {
@@ -50,9 +56,9 @@ export function HomeClient({ personas }: HomeClientProps) {
     <>
       <div className={styles.testerSection}>
         <div className={styles.testerHeadingWrap}>
-          <p className={styles.testerHeading}>Our Testers:</p>
+          <p className={styles.testerHeading}>{t.testers.heading}</p>
           <span className={styles.testerTooltip} role="note">
-            Click a tester to view their profile.
+            {t.testers.tooltip}
           </span>
         </div>
         <div className={styles.testerGrid}>
@@ -97,9 +103,9 @@ export function HomeClient({ personas }: HomeClientProps) {
               type="button"
               className={styles.modalClose}
               onClick={() => setSelectedPersona(null)}
-              aria-label="Close persona profile"
+              aria-label={t.testers.closeLabel}
             >
-              Close
+              {t.testers.close}
             </button>
 
             <div className={styles.modalHeader}>
@@ -115,23 +121,27 @@ export function HomeClient({ personas }: HomeClientProps) {
 
               <div className={styles.modalIntro}>
                 <p className={styles.modalTag}>
-                  Inspired by {selectedPersona.inspiredBy}
+                  {format(t.testers.inspiredBy, { name: selectedPersona.inspiredBy })}
                 </p>
                 <h2 id="persona-modal-title" className={styles.modalTitle}>
                   {selectedPersona.name}
                 </h2>
                 <p className={styles.modalSummary}>
-                  {getPersonaSummary(selectedPersona)}.
+                  {getPersonaSummary(
+                    selectedPersona,
+                    format(t.testers.fallbackSummary, { voice: selectedPersona.voice }),
+                  )}
+                  .
                 </p>
                 <div className={styles.modalMeta}>
                   <span className={styles.metaPill}>
-                    Voice: {selectedPersona.voice}
+                    {format(t.testers.voice, { value: selectedPersona.voice })}
                   </span>
                   <span className={styles.metaPill}>
-                    Experience: {selectedPersona.experienceLevel}
+                    {format(t.testers.experience, { value: selectedPersona.experienceLevel })}
                   </span>
                   <span className={styles.metaPill}>
-                    Patience: {selectedPersona.patience}
+                    {format(t.testers.patience, { value: selectedPersona.patience })}
                   </span>
                 </div>
               </div>
@@ -139,7 +149,7 @@ export function HomeClient({ personas }: HomeClientProps) {
 
             <div className={styles.modalGrid}>
               <section className={styles.modalSection}>
-                <h3 className={styles.modalSectionTitle}>Focus and Needs</h3>
+                <h3 className={styles.modalSectionTitle}>{t.testers.focus}</h3>
                 <ul className={styles.modalList}>
                   {selectedPersona.goals.map((goal) => (
                     <li key={goal}>{goal}</li>
@@ -148,7 +158,7 @@ export function HomeClient({ personas }: HomeClientProps) {
               </section>
 
               <section className={styles.modalSection}>
-                <h3 className={styles.modalSectionTitle}>Interests</h3>
+                <h3 className={styles.modalSectionTitle}>{t.testers.interests}</h3>
                 <ul className={styles.modalList}>
                   {selectedPersona.interests.map((interest) => (
                     <li key={interest}>{interest}</li>
@@ -157,7 +167,7 @@ export function HomeClient({ personas }: HomeClientProps) {
               </section>
 
               <section className={styles.modalSection}>
-                <h3 className={styles.modalSectionTitle}>Struggles</h3>
+                <h3 className={styles.modalSectionTitle}>{t.testers.struggles}</h3>
                 <ul className={styles.modalList}>
                   {selectedPersona.dislikes.map((dislike) => (
                     <li key={dislike}>{dislike}</li>
@@ -166,7 +176,7 @@ export function HomeClient({ personas }: HomeClientProps) {
               </section>
 
               <section className={styles.modalSection}>
-                <h3 className={styles.modalSectionTitle}>Testing Style</h3>
+                <h3 className={styles.modalSectionTitle}>{t.testers.testingStyle}</h3>
                 <ul className={styles.modalList}>
                   {selectedPersona.browseStyle.map((style) => (
                     <li key={style}>{style}</li>

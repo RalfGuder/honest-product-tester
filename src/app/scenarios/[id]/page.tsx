@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { getI18n } from "@/i18n/server";
 import { getPersonas } from "@/lib/personas";
 import { EXPLORE_SCENARIO_ID } from "@/lib/scenario-format";
 import { getScenario } from "@/lib/scenarios";
@@ -24,14 +25,14 @@ export default async function ScenarioPage({ params }: ScenarioPageProps) {
     notFound();
   }
 
-  const personas = await getPersonas();
+  const [personas, { t }] = await Promise.all([getPersonas(), getI18n()]);
 
   return (
     <div className={styles.page}>
       <main className={styles.main}>
         <div className={styles.header}>
           <Link href="/scenarios" className={styles.backLink}>
-            Back
+            {t.common.back}
           </Link>
           <h1 className={styles.title}>{scenario.title}</h1>
           <form action={deleteScenarioAction}>

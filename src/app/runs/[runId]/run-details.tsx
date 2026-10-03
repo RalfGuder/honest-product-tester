@@ -13,6 +13,10 @@ import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { LOCALE_NAMES } from "@/i18n/config";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { renderLiveText } from "@/i18n/live";
+import { useI18n } from "@/i18n/provider";
 import { REPORT_INSIGHT_DEFINITIONS } from "@/lib/report-insights";
 import type { CellRunRecord, RunManifest } from "@/lib/runs";
 import { EXPLORE_SCENARIO, EXPLORE_SCENARIO_ID } from "@/lib/scenario-model";
@@ -36,23 +40,26 @@ const statusIcons = {
   skipped: SkipForward,
 } as const;
 
-const VERDICT_DISPLAY: Record<Verdict, { icon: string; label: string }> = {
-  passed: { icon: "✅", label: "Passed" },
-  failed: { icon: "❌", label: "Failed" },
-  gave_up: { icon: "🏳️", label: "Gave up" },
-  limit_reached: { icon: "⏱️", label: "Limit reached" },
-  error: { icon: "⚠️", label: "Error" },
-  skipped: { icon: "⏭️", label: "Skipped" },
+const VERDICT_ICONS: Record<Verdict, string> = {
+  passed: "✅",
+  failed: "❌",
+  gave_up: "🏳️",
+  limit_reached: "⏱️",
+  error: "⚠️",
+  skipped: "⏭️",
 };
 
 const FINISHED_STATUSES: CellRunRecord["status"][] = ["completed", "failed", "skipped"];
 
 export function RunDetails({ initialRun }: RunDetailsProps) {
   const [run, setRun] = useState(initialRun);
+  const { t, format } = useI18n();
   const scenarios = run.manifest.scenarios?.length
     ? run.manifest.scenarios
     : [EXPLORE_SCENARIO];
   const [selectedScenarioId, setSelectedScenarioId] = useState(scenarios[0].id);
+  // Finished cells hide the screenshot and timeline; these cells have them opened again.
+  const [openDetails, setOpenDetails] = useState<Set<string>>(() => new Set());
   const terminalRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const runningCount = run.cells.filter((cell) => cell.status === "running").length;
   const finishedCount = run.cells.filter((cell) => FINISHED_STATUSES.includes(cell.status)).length;
@@ -107,13 +114,12 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
     }
   }, [run, selectedScenarioId]);
 
-  const statusCopy = useMemo(() => {
-    if (run.manifest.status === "running") {
-      return `Running ${runningCount} of ${run.cells.length} test runs`;
-    }
-
-    return run.manifest.status;
-  }, [run.manifest.status, run.cells.length, runningCount]);
+  const statusCopy =
+    run.manifest.status === "running"
+      ? format(t.run.running, { running: runningCount, total: run.cells.length })
+      : t.run.status[run.manifest.status];
+  const scenarioTitle = (scenario: { id: string; title: string }) =>
+    scenario.id === EXPLORE_SCENARIO_ID ? t.scenarios.explore : scenario.title;
 
   const fakeProgress = useMemo(() => {
     if (run.manifest.status !== "running") {
@@ -130,23 +136,30 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
       <div className={styles.topBar}>
         <div className={styles.topBarLeft}>
           <Link href="/" className={styles.backLink}>
-            Back
+            {t.common.back}
           </Link>
           <div className={styles.runMeta}>
-            <span className={styles.runUrl}>{`UX Testing ${run.manifest.url}`}</span>
+            <span className={styles.runUrl}>{format(t.run.uxTesting, { url: run.manifest.url })}</span>
+            {run.manifest.reportLanguage ? (
+              <span className={styles.runFacts}>
+                {format(t.run.reportLanguage, {
+                  language: LOCALE_NAMES[run.manifest.reportLanguage],
+                })}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className={styles.topBarRight}>
           {run.manifest.status === "running" ? (
             <div
               className={styles.progressStatus}
-              aria-label={`Run progress ${fakeProgress}%`}
+              aria-label={format(t.run.progressLabel, { value: fakeProgress })}
               role="progressbar"
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={fakeProgress}
             >
-              <span className={styles.progressLabel}>Progress</span>
+              <span className={styles.progressLabel}>{t.run.progress}</span>
               <div className={styles.progressTrack}>
                 <div
                   className={styles.progressFill}
@@ -166,7 +179,7 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
           <table className={styles.matrix}>
             <thead>
               <tr>
-                <th scope="col">Tester</th>
+                <th scope="col">{t.run.tester}</th>
                 {scenarios.map((scenario) => (
                   <th
                     key={scenario.id}
@@ -174,7 +187,7 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
                     data-selected={scenario.id === selectedScenarioId}
                   >
                     <button type="button" onClick={() => setSelectedScenarioId(scenario.id)}>
-                      {scenario.title}
+                      {scenarioTitle(scenario)}
                     </button>
                   </th>
                 ))}
@@ -198,12 +211,12 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
                               className={styles.matrixCell}
                               data-verdict={cell.cellReport?.verdict}
                               onClick={() => setSelectedScenarioId(scenario.id)}
-                              title={cell.summary}
+                              title={renderLiveText(cell.summary, t)}
                             >
                               <MatrixCellContent cell={cell} />
                             </button>
                           ) : (
-                            <span className={styles.notAssigned} title="Not assigned">
+                            <span className={styles.notAssigned} title={t.run.notAssigned}>
                               –
                             </span>
                           )}
@@ -216,7 +229,7 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
             </tbody>
             <tfoot>
               <tr>
-                <th scope="row">Passed</th>
+                <th scope="row">{t.run.passed}</th>
                 {scenarios.map((scenario) => (
                   <td key={scenario.id} data-selected={scenario.id === selectedScenarioId}>
                     {scenario.id === EXPLORE_SCENARIO_ID
@@ -237,6 +250,8 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
           {visibleCells.map((cell) => {
             const finished = FINISHED_STATUSES.includes(cell.status);
             const isExplore = cell.scenarioId === EXPLORE_SCENARIO_ID;
+            const showLive = !finished || openDetails.has(cell.cellId);
+            const DetailsIcon = openDetails.has(cell.cellId) ? ChevronUp : ChevronDown;
 
             return (
               <article key={cell.cellId} className={styles.personaCard} data-status={cell.status}>
@@ -262,13 +277,36 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
                       <CellReportView report={cell.cellReport} />
                     ) : null}
 
-                    {!finished || !isExplore ? (
+                    {finished ? (
+                      <button
+                        type="button"
+                        className={styles.expandInsightsButton}
+                        onClick={() =>
+                          setOpenDetails((current) => {
+                            const next = new Set(current);
+
+                            if (next.has(cell.cellId)) {
+                              next.delete(cell.cellId);
+                            } else {
+                              next.add(cell.cellId);
+                            }
+
+                            return next;
+                          })
+                        }
+                      >
+                        <DetailsIcon size={15} strokeWidth={2.6} />
+                        {openDetails.has(cell.cellId) ? t.run.hideDetails : t.run.showDetails}
+                      </button>
+                    ) : null}
+
+                    {showLive ? (
                       <>
                         <div className={styles.screenFrame}>
                           {cell.latestScreenshotFileName ? (
                             <Image
                               src={`/api/runs/${run.manifest.id}/screenshots/${cell.latestScreenshotFileName}?v=${cell.latestScreenshotTakenAt ?? cell.updatedAt ?? ""}`}
-                              alt={`${cell.personaName} live browser screenshot`}
+                              alt={format(t.run.screenshotAlt, { name: cell.personaName })}
                               fill
                               sizes="(max-width: 680px) 100vw, (max-width: 900px) 50vw, 33vw"
                               className={styles.screenImage}
@@ -277,22 +315,26 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
                           ) : (
                             <div className={styles.screenPlaceholder}>
                               <span className={styles.placeholderLabel}>
-                                {cell.status === "queued" ? "Booting persona" : "No screenshot yet"}
+                                {cell.status === "queued" ? t.run.bootingPersona : t.run.noScreenshot}
                               </span>
-                              <p>{cell.summary}</p>
+                              <p>{renderLiveText(cell.summary, t)}</p>
                             </div>
                           )}
                         </div>
 
                         <div className={styles.subsection}>
-                          <h4>{finished ? "Timeline" : "Live terminal"}</h4>
+                          <h4>{finished ? t.run.timeline : t.run.liveTerminal}</h4>
                           <div
                             ref={(node) => {
                               terminalRefs.current[cell.cellId] = node;
                             }}
                             className={styles.terminal}
                           >
-                            {buildTerminalLines(cell).map((line, index) => (
+                            {buildTerminalLines(
+                              cell,
+                              t,
+                              format(t.run.personaBooted, { status: t.cellStatus[cell.status] }),
+                            ).map((line, index) => (
                               <div
                                 key={`${cell.cellId}-terminal-${index}-${line.label}`}
                                 className={styles.terminalLine}
@@ -321,13 +363,15 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
 }
 
 function MatrixCellContent({ cell }: { cell: CellRunRecord }) {
+  const { t } = useI18n();
+
   if (cell.cellReport) {
-    const display = VERDICT_DISPLAY[cell.cellReport.verdict];
+    const { verdict } = cell.cellReport;
 
     return (
       <>
-        <span aria-hidden="true">{display.icon}</span>
-        <span>{display.label}</span>
+        <span aria-hidden="true">{VERDICT_ICONS[verdict]}</span>
+        <span>{t.verdicts[verdict]}</span>
         {cell.cellReport.verdict !== "skipped" ? (
           <span className={styles.matrixSteps}>
             {cell.cellReport.stepsUsed}/{cell.cellReport.maxSteps}
@@ -342,7 +386,7 @@ function MatrixCellContent({ cell }: { cell: CellRunRecord }) {
   return (
     <>
       <StatusIcon size={15} strokeWidth={2.2} aria-hidden="true" />
-      <span>{cell.status}</span>
+      <span>{t.cellStatus[cell.status]}</span>
     </>
   );
 }
@@ -357,28 +401,33 @@ function formatPassRate(cells: CellRunRecord[]) {
 }
 
 function CellReportView({ report }: { report: CellReport }) {
-  const display = VERDICT_DISPLAY[report.verdict];
+  const { t, format } = useI18n();
 
   return (
     <div className={styles.reportBlock}>
       <div className={styles.verdictLine} data-verdict={report.verdict}>
-        <span aria-hidden="true">{display.icon}</span>
-        <strong>{display.label}</strong>
+        <span aria-hidden="true">{VERDICT_ICONS[report.verdict]}</span>
+        <strong>{t.verdicts[report.verdict]}</strong>
         <span className={styles.matrixSteps}>
-          {report.stepsUsed} / {report.maxSteps} steps
+          {format(t.run.steps, { used: report.stepsUsed, max: report.maxSteps })}
         </span>
       </div>
       {report.misjudged ? (
         <p className={styles.misjudged}>
-          Persona misjudged: they reported &quot;{report.selfVerdict}&quot;, the assertions say
-          otherwise.
+          {format(t.run.misjudged, {
+            verdict: report.selfVerdict ? t.verdicts[report.selfVerdict] : "",
+          })}
         </p>
       ) : null}
       {report.quote ? <blockquote className={styles.personaQuote}>{report.quote}</blockquote> : null}
-      {report.note ? <p className={styles.reportNote}>{report.note}</p> : null}
+      {report.noteMessage || report.note ? (
+        <p className={styles.reportNote}>
+          {report.noteMessage ? renderLiveText(report.noteMessage, t) : report.note}
+        </p>
+      ) : null}
       {report.frictionPoints.length > 0 ? (
         <section className={styles.insightCard}>
-          <h4 className={styles.insightTitle}>Friction points</h4>
+          <h4 className={styles.insightTitle}>{t.run.frictionPoints}</h4>
           <ul className={styles.frictionList}>
             {report.frictionPoints.map((item) => (
               <li key={item}>{item}</li>
@@ -388,7 +437,7 @@ function CellReportView({ report }: { report: CellReport }) {
       ) : null}
       {report.evidence.finalUrl || report.evidence.quote ? (
         <section className={styles.insightCard}>
-          <h4 className={styles.insightTitle}>Evidence</h4>
+          <h4 className={styles.insightTitle}>{t.run.evidence}</h4>
           {report.evidence.finalUrl ? (
             <p className={styles.evidenceUrl}>{report.evidence.finalUrl}</p>
           ) : null}
@@ -399,12 +448,12 @@ function CellReportView({ report }: { report: CellReport }) {
       ) : null}
       {report.assertionResults.length > 0 ? (
         <section className={styles.insightCard}>
-          <h4 className={styles.insightTitle}>Assertions</h4>
+          <h4 className={styles.insightTitle}>{t.run.assertions}</h4>
           <ul className={styles.frictionList}>
             {report.assertionResults.map((result) => (
               <li key={`${result.type}-${result.value}`} title={result.detail}>
                 {result.passed ? "✅" : "❌"}{" "}
-                {result.type === "url_contains" ? "URL contains" : "Shows text"} &quot;
+                {result.type === "url_contains" ? t.run.urlContains : t.run.showsText} &quot;
                 {result.value}&quot;
               </li>
             ))}
@@ -416,10 +465,15 @@ function CellReportView({ report }: { report: CellReport }) {
 }
 
 function StatusBadge({ status }: { status: CellRunRecord["status"] }) {
+  const { t } = useI18n();
   const StatusIcon = statusIcons[status];
 
   return (
-    <span className={styles.queueBadge} aria-label={status} title={status}>
+    <span
+      className={styles.queueBadge}
+      aria-label={t.cellStatus[status]}
+      title={t.cellStatus[status]}
+    >
       <StatusIcon size={18} strokeWidth={2.2} />
     </span>
   );
@@ -432,20 +486,24 @@ type TerminalLine = {
   tone: "neutral" | "success" | "error";
 };
 
-function buildTerminalLines(personaRun: CellRunRecord): TerminalLine[] {
+function buildTerminalLines(
+  personaRun: CellRunRecord,
+  t: Dictionary,
+  bootedLabel: string,
+): TerminalLine[] {
   const lines: TerminalLine[] = [];
 
   lines.push({
     time: formatTerminalTime(personaRun.startedAt ?? personaRun.updatedAt),
     prompt: "$",
-    label: `persona booted (${personaRun.status})`,
+    label: bootedLabel,
     tone: "neutral",
   });
 
   lines.push({
     time: formatTerminalTime(personaRun.updatedAt),
     prompt: ">",
-    label: personaRun.summary,
+    label: renderLiveText(personaRun.summary, t),
     tone: personaRun.status === "failed" ? "error" : "neutral",
   });
 
@@ -462,7 +520,7 @@ function buildTerminalLines(personaRun: CellRunRecord): TerminalLine[] {
     lines.push({
       time: formatTerminalTime(personaRun.updatedAt),
       prompt: "*",
-      label: summarizeObservation(observation),
+      label: summarizeObservation(renderLiveText(observation, t)),
       tone: "neutral",
     });
   }
@@ -512,14 +570,13 @@ function formatTerminalTime(timestamp?: string) {
 
 function StructuredSummary({ personaRun }: { personaRun: CellRunRecord }) {
   const [showAllInsights, setShowAllInsights] = useState(false);
+  const { t } = useI18n();
   const ExpandIcon = showAllInsights ? ChevronUp : ChevronDown;
 
   if (!personaRun.structuredSummary?.length) {
     return (
       <div className={styles.reportBlock}>
-        <p className={styles.emptySummary}>
-          No structured summary was captured for this persona.
-        </p>
+        <p className={styles.emptySummary}>{t.run.noSummary}</p>
       </div>
     );
   }
@@ -537,7 +594,7 @@ function StructuredSummary({ personaRun }: { personaRun: CellRunRecord }) {
         {visibleInsights.map((definition) => {
           const answer =
             personaRun.structuredSummary?.find((item) => item.id === definition.id)
-              ?.answer ?? "Missing answer.";
+              ?.answer ?? t.run.missingAnswer;
 
           return (
             <section key={definition.id} className={styles.insightCard}>
@@ -545,9 +602,9 @@ function StructuredSummary({ personaRun }: { personaRun: CellRunRecord }) {
                 <div className={styles.insightTitleWrap}>
                   <div className={styles.tooltipWrap}>
                     <h4 className={styles.insightTitle} tabIndex={0}>
-                      {definition.title}
+                      {t.insights[definition.id].title}
                     </h4>
-                    <span className={styles.tooltip}>{definition.info}</span>
+                    <span className={styles.tooltip}>{t.insights[definition.id].info}</span>
                   </div>
                 </div>
               </div>
@@ -564,7 +621,7 @@ function StructuredSummary({ personaRun }: { personaRun: CellRunRecord }) {
         }}
       >
         <ExpandIcon size={15} strokeWidth={2.6} />
-        {showAllInsights ? "Show fewer" : "Show all 4"}
+        {showAllInsights ? t.run.showFewer : t.run.showAll}
       </button>
     </div>
   );

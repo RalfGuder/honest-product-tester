@@ -596,3 +596,19 @@
 .formWarning {
   color: #b42300;
 }
+
+.inlineField {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inlineField select {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid #111111;
+  background: #ffffff;
+  color: #111111;
+  font: inherit;
+}

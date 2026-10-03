@@ -1,6 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import type { Locale } from "@/i18n/config";
+import { getDictionary } from "@/i18n/dictionaries";
+import type { LiveText } from "@/i18n/live";
+import { buildQueuedReportMarkdown } from "@/lib/report-markdown";
 import { comparePersonaIds, Persona } from "@/lib/personas";
 import type { PersonaReportInsight } from "@/lib/report-insights";
 import {
@@ -28,6 +32,8 @@ export type RunManifest = {
   personas: string[];
   // Snapshot of the scenarios at run start. Missing in runs created before scenarios existed.
   scenarios?: Scenario[];
+  // Language the personas answer in. Missing in runs created before reports were localized.
+  reportLanguage?: Locale;
   currentPersonaId?: string;
   error?: string;
 };
@@ -48,9 +54,9 @@ export type CellRunRecord = {
   scenarioId: string;
   scenarioTitle: string;
   status: CellRunStatus;
-  summary: string;
+  summary: LiveText;
   reportPath: string;
-  observations: string[];
+  observations: LiveText[];
   actions: PersonaAction[];
   latestScreenshotFileName?: string;
   latestScreenshotTakenAt?: string;
@@ -76,7 +82,12 @@ export function getRunScenarios(manifest: RunManifest) {
   return manifest.scenarios?.length ? manifest.scenarios : [EXPLORE_SCENARIO];
 }
 
-export async function createRun(url: string, personas: Persona[], scenarios: Scenario[]) {
+export async function createRun(
+  url: string,
+  personas: Persona[],
+  scenarios: Scenario[],
+  reportLanguage?: Locale,
+) {
   const trimmedUrl = url.trim();
   const parsedUrl = validatePublicUrl(trimmedUrl);
 
@@ -110,11 +121,14 @@ export async function createRun(url: string, personas: Persona[], scenarios: Sce
     orchestration: "parallel",
     personas: personas.map((persona) => persona.id),
     scenarios,
+    reportLanguage,
   };
 
   await fs.mkdir(path.join(runDir, "cells"), { recursive: true });
   await fs.mkdir(path.join(runDir, "screenshots"), { recursive: true });
   await writeManifest(runId, manifest);
+
+  const t = getDictionary(reportLanguage ?? "en");
 
   await Promise.all(
     cellPlan.map(async ({ personaId, scenario }) => {
@@ -128,12 +142,12 @@ export async function createRun(url: string, personas: Persona[], scenarios: Sce
         scenarioId: scenario.id,
         scenarioTitle: scenario.title,
         status: "queued",
-        summary: "Run created. Waiting for live execution.",
+        summary: { key: "runCreated" },
         reportPath: path.join("cells", `${cellId}.md`),
         observations: [
-          "Persona loaded from Markdown draft.",
-          `Scenario: ${scenario.title}.`,
-          "Live browser session has not started yet.",
+          { key: "personaLoaded" },
+          { key: "scenarioNamed", params: { title: scenario.title, scenarioId: scenario.id } },
+          { key: "browserNotStarted" },
         ],
         actions: [],
       };
@@ -142,7 +156,12 @@ export async function createRun(url: string, personas: Persona[], scenarios: Sce
       await writeCellReport(
         runId,
         cellId,
-        `# ${persona.name} – ${scenario.title}\n\nStatus: queued\n\nThis run was initialized and is waiting to start.\n`,
+        buildQueuedReportMarkdown(
+          t,
+          scenario.id === EXPLORE_SCENARIO_ID
+            ? persona.name
+            : `${persona.name} – ${scenario.title}`,
+        ),
       );
     }),
   );
@@ -210,7 +229,7 @@ export async function updateCellRecord(
 export async function appendCellObservation(
   runId: string,
   cellId: string,
-  observation: string,
+  observation: LiveText,
 ) {
   return updateCellRecord(runId, cellId, (current) => ({
     ...current,
@@ -227,6 +246,15 @@ export async function appendCellAction(runId: string, cellId: string, action: Pe
 
 export async function writeCellReport(runId: string, cellId: string, markdown: string) {
   await fs.writeFile(path.join(runsDir, runId, "cells", `${cellId}.md`), markdown, "utf8");
+}
+
+/** Keeps the persona's raw final answer(s) next to the report, so parse failures can be traced. */
+export async function writeCellRawOutput(runId: string, cellId: string, attempts: string[]) {
+  const content = attempts
+    .map((text, index) => `=== ${index === 0 ? "final answer" : `repair ${index}`} ===\n${text}\n`)
+    .join("\n");
+
+  await fs.writeFile(path.join(runsDir, runId, "cells", `${cellId}.raw.txt`), content, "utf8");
 }
 
 export function getScreenshotDir(runId: string) {

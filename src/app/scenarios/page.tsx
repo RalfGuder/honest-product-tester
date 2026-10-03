@@ -1,13 +1,18 @@
 import Link from "next/link";
 import { connection } from "next/server";
 
+import { getI18n } from "@/i18n/server";
 import { getPersonas } from "@/lib/personas";
 import { getScenarios } from "@/lib/scenarios";
 import styles from "./scenarios.module.css";
 
 export default async function ScenariosPage() {
   await connection();
-  const [scenarios, personas] = await Promise.all([getScenarios(), getPersonas()]);
+  const [scenarios, personas, { t, format, plural }] = await Promise.all([
+    getScenarios(),
+    getPersonas(),
+    getI18n(),
+  ]);
   const personaNames = new Map(personas.map((persona) => [persona.id, persona.name]));
 
   return (
@@ -15,20 +20,17 @@ export default async function ScenariosPage() {
       <main className={styles.main}>
         <div className={styles.header}>
           <Link href="/" className={styles.backLink}>
-            Back
+            {t.common.back}
           </Link>
-          <h1 className={styles.title}>Test scenarios</h1>
+          <h1 className={styles.title}>{t.scenarioList.title}</h1>
           <Link href="/scenarios/new" className={styles.primaryButton}>
-            New scenario
+            {t.scenarioList.newScenario}
           </Link>
         </div>
-        <p className={styles.intro}>
-          A scenario gives every selected tester a mission and a success criterion. Each tester
-          takes their own path and reports whether they made it, gave up, or failed.
-        </p>
+        <p className={styles.intro}>{t.scenarioList.intro}</p>
 
         {scenarios.length === 0 ? (
-          <p className={styles.empty}>No scenarios yet. Create the first one.</p>
+          <p className={styles.empty}>{t.scenarioList.empty}</p>
         ) : (
           <ul className={styles.list}>
             {scenarios.map((scenario) => (
@@ -39,17 +41,21 @@ export default async function ScenariosPage() {
                   <div className={styles.tags}>
                     <span>
                       {scenario.personas?.length
-                        ? `testers: ${scenario.personas.map((id) => personaNames.get(id) ?? id).join(", ")}`
-                        : "all testers"}
+                        ? format(t.scenarioList.testers, {
+                            names: scenario.personas
+                              .map((id) => personaNames.get(id) ?? id)
+                              .join(", "),
+                          })
+                        : t.scenarioList.allTesters}
                     </span>
-                    <span>{scenario.targetHost ?? "any site"}</span>
-                    <span>login: {scenario.login}</span>
-                    <span>max {scenario.maxSteps} steps</span>
+                    <span>{scenario.targetHost ?? t.scenarioList.anySite}</span>
+                    <span>{format(t.scenarioList.login, { mode: scenario.login })}</span>
+                    <span>{format(t.scenarioList.maxSteps, { count: scenario.maxSteps })}</span>
                     {scenario.allowSubmit ? (
-                      <span className={styles.warnTag}>submits forms</span>
+                      <span className={styles.warnTag}>{t.scenarioList.submitsForms}</span>
                     ) : null}
                     {scenario.assertions.length > 0 ? (
-                      <span>{scenario.assertions.length} assertion(s)</span>
+                      <span>{plural(t.scenarioList.assertions, scenario.assertions.length)}</span>
                     ) : null}
                   </div>
                 </Link>
