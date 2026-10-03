@@ -14,18 +14,35 @@ import {
 import { getPersonaLogin, type BasicAuth, type PersonaLogin } from "@/lib/credentials";
 import { getPersonas, type Persona } from "@/lib/personas";
 import {
-  appendPersonaAction,
-  appendPersonaObservation,
+  appendCellAction,
+  appendCellObservation,
+  getCellId,
   getRun,
+  getRunScenarios,
   getScreenshotDir,
-  updatePersonaRecord,
+  updateCellRecord,
   updateRunManifest,
-  writePersonaReport,
+  writeCellReport,
 } from "@/lib/runs";
 import {
   REPORT_INSIGHT_DEFINITIONS,
   type PersonaReportInsight,
 } from "@/lib/report-insights";
+import {
+  EXPLORE_SCENARIO_ID,
+  resolveStartUrl,
+  type Scenario,
+  type ScenarioAssertion,
+} from "@/lib/scenario-format";
+import {
+  createStepBudget,
+  parseCellReport,
+  reconcileVerdict,
+  type AssertionResult,
+  type CellReport,
+  type ParsedCellReport,
+  type StepBudget,
+} from "@/lib/scenario-verdict";
 
 // On Windows the .bin shim is a shell script that execFile cannot spawn,
 // so call the bundled native binary directly.
@@ -42,6 +59,12 @@ const AGENT_BROWSER_BIN =
 const PERSONA_MODEL_PROVIDER = "anthropic";
 const PERSONA_MODEL_ID = "claude-sonnet-4-5";
 const PERSONA_MODEL_FALLBACK_ID = "claude-opus-5-5";
+// Wall-clock budget per persona × scenario cell; afterwards browser tools refuse to run.
+const CELL_TIMEOUT_MS = 10 * 60_000;
+// Time the persona gets to write its report after the budget ran out, before the session is aborted.
+const REPORT_GRACE_MS = 60_000;
+// Refused actions tolerated after the budget ran out, before the session is aborted.
+const MAX_BLOCKED_ACTIONS = 3;
 const activeRuns = globalThis.__honestProductTesterRuns ?? new Map<string, Promise<void>>();
 
 globalThis.__honestProductTesterRuns = activeRuns;
@@ -65,6 +88,7 @@ export function ensureRunStarted(runId: string) {
 async function executeRun(runId: string) {
   const { manifest } = await getRun(runId);
   const personas = await getPersonas();
+  const scenarios = getRunScenarios(manifest);
   const runPersonas = manifest.personas
     .map((personaId) => personas.find((item) => item.id === personaId))
     .filter((persona): persona is Persona => Boolean(persona));
@@ -75,55 +99,92 @@ async function executeRun(runId: string) {
     startedAt: current.startedAt ?? new Date().toISOString(),
   }));
 
-  try {
-    const results = await Promise.allSettled(
-      runPersonas.map((persona) => runPersona(runId, manifest.url, persona)),
-    );
-    const failures = results.filter(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
+  // Personas run in parallel; each persona works through its scenarios one after another.
+  const results = await Promise.allSettled(
+    runPersonas.map((persona) => runPersonaScenarios(runId, manifest.url, persona, scenarios)),
+  );
+  const failures = results.filter(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
 
-    await updateRunManifest(runId, (current) => ({
-      ...current,
-      status: failures.length > 0 ? "failed" : "completed",
-      completedAt: new Date().toISOString(),
-      currentPersonaId: undefined,
-      error:
-        failures.length > 0
-          ? failures
-              .map((failure) =>
-                failure.reason instanceof Error
-                  ? failure.reason.message
-                  : "Unknown persona failure",
-              )
-              .join("\n")
-          : undefined,
-    }));
-  } finally {
-    await Promise.allSettled(
-      runPersonas.map((persona) => closeBrowserSession(runId, persona.id)),
-    );
+  await updateRunManifest(runId, (current) => ({
+    ...current,
+    status: failures.length > 0 ? "failed" : "completed",
+    completedAt: new Date().toISOString(),
+    currentPersonaId: undefined,
+    error:
+      failures.length > 0
+        ? failures
+            .map((failure) =>
+              failure.reason instanceof Error
+                ? failure.reason.message
+                : "Unknown persona failure",
+            )
+            .join("\n")
+        : undefined,
+  }));
+}
+
+async function runPersonaScenarios(
+  runId: string,
+  url: string,
+  persona: Persona,
+  scenarios: Scenario[],
+) {
+  const errors: string[] = [];
+
+  for (const scenario of scenarios) {
+    try {
+      await runCell(runId, url, persona, scenario);
+    } catch (error) {
+      errors.push(
+        `${persona.name} / ${scenario.title}: ${error instanceof Error ? error.message : "unknown failure"}`,
+      );
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(errors.join("\n"));
   }
 }
 
-async function runPersona(runId: string, url: string, persona: Persona) {
-  const browserSession = getBrowserSessionName(runId, persona.id);
+async function runCell(runId: string, url: string, persona: Persona, scenario: Scenario) {
+  const cellId = getCellId(persona.id, scenario.id);
+  const browserSession = getBrowserSessionName(runId, cellId);
+  const isExplore = scenario.id === EXPLORE_SCENARIO_ID;
+  const startUrl = resolveStartUrl(url, scenario.startPath);
+  const reportTitle = isExplore ? persona.name : `${persona.name} – ${scenario.title}`;
 
-  await updatePersonaRecord(runId, persona.id, (current) => ({
+  await updateCellRecord(runId, cellId, (current) => ({
     ...current,
     status: "running",
     startedAt: current.startedAt ?? new Date().toISOString(),
     summary: "Launching Pi session and browser tools.",
   }));
-  await appendPersonaObservation(runId, persona.id, "Persona run started.");
+  await appendCellObservation(runId, cellId, "Persona run started.");
+
+  const login = await resolveCellLogin(persona, scenario);
+
+  if (login.skipReason) {
+    await skipCell(runId, cellId, scenario, reportTitle, login.skipReason);
+    return;
+  }
 
   const screenshotDir = getScreenshotDir(runId);
+  const budget = createStepBudget(scenario.maxSteps);
+  const control = {
+    timedOut: false,
+    abortedByLimit: false,
+    abort: () => {},
+  };
   let reportText = "";
   let providerError: string | undefined;
 
   const tools = createBrowserTools({
     browserSession,
-    persona,
+    budget,
+    cellId,
+    control,
     runId,
     screenshotDir,
   });
@@ -141,8 +202,13 @@ async function runPersona(runId: string, url: string, persona: Persona) {
     sessionManager: SessionManager.inMemory(),
   });
 
+  control.abort = () => {
+    control.abortedByLimit = true;
+    void session.abort();
+  };
+
   const unsubscribe = session.subscribe((event) => {
-    void handleSessionEvent(runId, persona.id, event);
+    void handleSessionEvent(runId, cellId, event);
     const eventProviderError = getProviderError(event);
 
     if (eventProviderError) {
@@ -157,83 +223,291 @@ async function runPersona(runId: string, url: string, persona: Persona) {
     }
   });
 
-  try {
-    const login = await getPersonaLogin(persona.id);
+  let graceTimer: NodeJS.Timeout | undefined;
+  const timeoutTimer = setTimeout(() => {
+    control.timedOut = true;
+    graceTimer = setTimeout(control.abort, REPORT_GRACE_MS);
+  }, CELL_TIMEOUT_MS);
 
-    if (login) {
-      await updatePersonaRecord(runId, persona.id, (current) => ({
+  try {
+    if (login.value) {
+      await updateCellRecord(runId, cellId, (current) => ({
         ...current,
-        summary: `Logging in as ${login.username}.`,
+        summary: `Logging in as ${login.value?.username}.`,
       }));
-      await loginPersona(browserSession, login);
-      await appendPersonaObservation(
-        runId,
-        persona.id,
-        `Logged in as ${login.username}.`,
-      );
+      await loginPersona(browserSession, login.value);
+      await appendCellObservation(runId, cellId, `Logged in as ${login.value.username}.`);
     }
 
-    await session.prompt(buildPersonaPrompt(persona, url, Boolean(login)));
+    await session.prompt(
+      isExplore
+        ? buildPersonaPrompt(persona, startUrl, Boolean(login.value))
+        : buildMissionPrompt(persona, scenario, startUrl, Boolean(login.value)),
+    );
 
-    if (providerError) {
+    if (providerError && !control.abortedByLimit) {
       throw new Error(providerError);
     }
 
-    const structuredSummary = parseStructuredSummary(reportText);
-    const finalReport = buildSummaryMarkdown(persona.name, structuredSummary);
+    if (isExplore) {
+      const structuredSummary = parseStructuredSummary(reportText);
+      const finalReport = buildSummaryMarkdown(persona.name, structuredSummary);
 
-    await updatePersonaRecord(runId, persona.id, (current) => ({
-      ...current,
-      status: "completed",
-      completedAt: new Date().toISOString(),
-      summary: "Finished browsing and captured structured feedback.",
-      structuredSummary,
-      finalReport,
-    }));
-    await writePersonaReport(runId, persona.id, finalReport);
-    await appendPersonaObservation(
-      runId,
-      persona.id,
-      "Structured persona report written to disk.",
-    );
+      await updateCellRecord(runId, cellId, (current) => ({
+        ...current,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        summary: "Finished browsing and captured structured feedback.",
+        structuredSummary,
+        finalReport,
+      }));
+      await writeCellReport(runId, cellId, finalReport);
+    } else {
+      const cellReport = await evaluateMission({
+        browserSession,
+        budget,
+        cellId,
+        control,
+        reportText,
+        runId,
+        scenario,
+        screenshotDir,
+      });
+      const finalReport = buildCellReportMarkdown(reportTitle, scenario, cellReport);
+
+      await updateCellRecord(runId, cellId, (current) => ({
+        ...current,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        summary: `Scenario finished: ${cellReport.verdict}.`,
+        cellReport,
+        finalReport,
+      }));
+      await writeCellReport(runId, cellId, finalReport);
+    }
+
+    await appendCellObservation(runId, cellId, "Structured persona report written to disk.");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown persona failure";
 
-    await updatePersonaRecord(runId, persona.id, (current) => ({
+    await updateCellRecord(runId, cellId, (current) => ({
       ...current,
       status: "failed",
       completedAt: new Date().toISOString(),
       summary: "Persona run failed.",
       error: message,
+      cellReport: isExplore
+        ? undefined
+        : buildFixedReport("error", scenario, budget.used, message),
     }));
-    await writePersonaReport(
-      runId,
-      persona.id,
-      `# ${persona.name}\n\nRun failed.\n\n${message}\n`,
-    );
+    await writeCellReport(runId, cellId, `# ${reportTitle}\n\nRun failed.\n\n${message}\n`);
 
     throw error;
   } finally {
+    clearTimeout(timeoutTimer);
+    clearTimeout(graceTimer);
     unsubscribe();
     session.dispose();
-    await closeBrowserSession(runId, persona.id).catch(() => undefined);
+    await closeBrowserSession(browserSession).catch(() => undefined);
   }
+}
+
+async function resolveCellLogin(
+  persona: Persona,
+  scenario: Scenario,
+): Promise<{ value?: PersonaLogin; skipReason?: string }> {
+  if (scenario.login === "anonymous") {
+    return {};
+  }
+
+  if (scenario.login === "auto") {
+    return { value: await getPersonaLogin(persona.id) };
+  }
+
+  try {
+    const value = await getPersonaLogin(persona.id);
+
+    return value ? { value } : { skipReason: "Scenario requires a login, but no credentials file exists." };
+  } catch (error) {
+    return {
+      skipReason: `Scenario requires a login: ${error instanceof Error ? error.message : "no credentials"}`,
+    };
+  }
+}
+
+async function skipCell(
+  runId: string,
+  cellId: string,
+  scenario: Scenario,
+  reportTitle: string,
+  reason: string,
+) {
+  const cellReport = buildFixedReport("skipped", scenario, 0, reason);
+
+  await updateCellRecord(runId, cellId, (current) => ({
+    ...current,
+    status: "skipped",
+    completedAt: new Date().toISOString(),
+    summary: reason,
+    cellReport,
+  }));
+  await appendCellObservation(runId, cellId, `Skipped: ${reason}`);
+  await writeCellReport(runId, cellId, buildCellReportMarkdown(reportTitle, scenario, cellReport));
+}
+
+function buildFixedReport(
+  verdict: "error" | "skipped",
+  scenario: Scenario,
+  stepsUsed: number,
+  note: string,
+): CellReport {
+  return {
+    verdict,
+    misjudged: false,
+    evidence: {},
+    stepsUsed,
+    maxSteps: scenario.maxSteps,
+    frictionPoints: [],
+    quote: "",
+    assertionResults: [],
+    note,
+  };
+}
+
+async function evaluateMission({
+  browserSession,
+  budget,
+  cellId,
+  control,
+  reportText,
+  runId,
+  scenario,
+  screenshotDir,
+}: {
+  browserSession: string;
+  budget: StepBudget;
+  cellId: string;
+  control: { timedOut: boolean; abortedByLimit: boolean };
+  reportText: string;
+  runId: string;
+  scenario: Scenario;
+  screenshotDir: string;
+}): Promise<CellReport> {
+  const limitHit = budget.exhausted || control.timedOut || control.abortedByLimit;
+  let parsed: ParsedCellReport;
+
+  try {
+    parsed = parseCellReport(reportText);
+  } catch (error) {
+    if (!limitHit) {
+      throw error;
+    }
+
+    // The persona ran out of budget before it could write a report.
+    parsed = { selfVerdict: "limit_reached", evidence: {}, frictionPoints: [], quote: "" };
+  }
+
+  const finalUrl = await readCurrentUrl(browserSession).catch(() => undefined);
+  const assertionResults = await checkAssertions(browserSession, scenario.assertions, finalUrl);
+  const { verdict, misjudged } = reconcileVerdict(parsed.selfVerdict, assertionResults);
+
+  await captureFinalScreenshot(runId, cellId, browserSession, screenshotDir).catch(
+    () => undefined,
+  );
+
+  return {
+    verdict,
+    selfVerdict: parsed.selfVerdict,
+    misjudged,
+    evidence: { ...parsed.evidence, finalUrl: parsed.evidence.finalUrl ?? finalUrl },
+    stepsUsed: budget.used,
+    maxSteps: scenario.maxSteps,
+    frictionPoints: parsed.frictionPoints,
+    quote: parsed.quote,
+    assertionResults,
+    note: control.timedOut
+      ? `Time budget of ${CELL_TIMEOUT_MS / 60_000} minutes ran out.`
+      : budget.exhausted
+        ? `Step budget of ${scenario.maxSteps} browser actions was used up.`
+        : undefined,
+  };
+}
+
+async function readCurrentUrl(browserSession: string) {
+  const { stdout } = await runAgentBrowser(["--session", browserSession, "get", "url"]);
+
+  return stdout.trim();
+}
+
+async function checkAssertions(
+  browserSession: string,
+  assertions: ScenarioAssertion[],
+  finalUrl: string | undefined,
+): Promise<AssertionResult[]> {
+  const results: AssertionResult[] = [];
+
+  for (const assertion of assertions) {
+    if (assertion.type === "url_contains") {
+      results.push({
+        ...assertion,
+        passed: Boolean(finalUrl?.includes(assertion.value)),
+        detail: finalUrl ? `Final URL: ${finalUrl}` : "Final URL could not be read.",
+      });
+      continue;
+    }
+
+    try {
+      const script = `document.body.innerText.includes(${JSON.stringify(assertion.value)})`;
+      const { stdout } = await runAgentBrowser(["--session", browserSession, "eval", script]);
+
+      results.push({ ...assertion, passed: stdout.trim() === "true" });
+    } catch (error) {
+      results.push({
+        ...assertion,
+        passed: false,
+        detail: error instanceof Error ? error.message : "Check failed.",
+      });
+    }
+  }
+
+  return results;
+}
+
+async function captureFinalScreenshot(
+  runId: string,
+  cellId: string,
+  browserSession: string,
+  screenshotDir: string,
+) {
+  const fileName = `${cellId}-${Date.now()}-final.png`;
+
+  await runAgentBrowser([
+    "--session",
+    browserSession,
+    "screenshot",
+    path.join(screenshotDir, fileName),
+  ]);
+  await updateCellRecord(runId, cellId, (current) => ({
+    ...current,
+    latestScreenshotFileName: fileName,
+    latestScreenshotTakenAt: new Date().toISOString(),
+  }));
 }
 
 async function handleSessionEvent(
   runId: string,
-  personaId: string,
+  cellId: string,
   event: AgentSessionEvent,
 ) {
   if (event.type === "tool_execution_start") {
-    await updatePersonaRecord(runId, personaId, (current) => ({
+    await updateCellRecord(runId, cellId, (current) => ({
       ...current,
       summary: `Running ${event.toolName}...`,
     }));
   }
 
   if (event.type === "tool_execution_end") {
-    await updatePersonaRecord(runId, personaId, (current) => ({
+    await updateCellRecord(runId, cellId, (current) => ({
       ...current,
       summary: event.isError
         ? `${event.toolName} failed.`
@@ -242,25 +516,48 @@ async function handleSessionEvent(
   }
 }
 
+const TIME_UP_MESSAGE =
+  "Time is up. Do not call any more tools. Return your final JSON report now.";
+const STEP_LIMIT_MESSAGE =
+  "Step budget exhausted. Do not call any more browser actions. Return your final JSON report now.";
+
 function createBrowserTools({
   browserSession,
-  persona,
+  budget,
+  cellId,
+  control,
   runId,
   screenshotDir,
 }: {
   browserSession: string;
-  persona: Persona;
+  budget: StepBudget;
+  cellId: string;
+  control: { timedOut: boolean; abort: () => void };
   runId: string;
   screenshotDir: string;
 }) {
-  const runTool = async (name: string, args: string[]) => {
+  // Actions change the page and count against the step budget; reads are free.
+  const runTool = async (name: string, args: string[], { isAction = false } = {}) => {
     const input = args.join(" ");
+
+    if (control.timedOut) {
+      throw new Error(TIME_UP_MESSAGE);
+    }
+
+    if (isAction && !budget.tryConsume()) {
+      if (budget.blocked > MAX_BLOCKED_ACTIONS) {
+        control.abort();
+      }
+
+      await appendCellObservation(runId, cellId, `${name} refused: step budget exhausted.`);
+      throw new Error(STEP_LIMIT_MESSAGE);
+    }
 
     try {
       const result = await runAgentBrowser(["--session", browserSession, ...args]);
       const stdout = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
 
-      await appendPersonaAction(runId, persona.id, {
+      await appendCellAction(runId, cellId, {
         at: new Date().toISOString(),
         tool: name,
         input,
@@ -268,11 +565,7 @@ function createBrowserTools({
       });
 
       if (stdout) {
-        await appendPersonaObservation(
-          runId,
-          persona.id,
-          `${name}: ${stdout.slice(0, 280)}`,
-        );
+        await appendCellObservation(runId, cellId, `${name}: ${stdout.slice(0, 280)}`);
       }
 
       return stdout || "ok";
@@ -280,17 +573,18 @@ function createBrowserTools({
       const message =
         error instanceof Error ? error.message : `${name} failed unexpectedly`;
 
-      await appendPersonaAction(runId, persona.id, {
+      await appendCellAction(runId, cellId, {
         at: new Date().toISOString(),
         tool: name,
         input,
         outcome: "error",
       });
-      await appendPersonaObservation(runId, persona.id, `${name} error: ${message}`);
+      await appendCellObservation(runId, cellId, `${name} error: ${message}`);
 
       throw error;
     }
   };
+  const action = { isAction: true };
 
   return [
     defineTool({
@@ -301,7 +595,9 @@ function createBrowserTools({
         url: Type.String({ description: "Absolute URL to open" }),
       }),
       execute: async (_toolCallId, params) => ({
-        content: [{ type: "text", text: await runTool("browser_open", ["open", params.url]) }],
+        content: [
+          { type: "text", text: await runTool("browser_open", ["open", params.url], action) },
+        ],
         details: {},
       }),
     }),
@@ -323,7 +619,12 @@ function createBrowserTools({
         target: Type.String({ description: "Ref like @e2 or selector" }),
       }),
       execute: async (_toolCallId, params) => ({
-        content: [{ type: "text", text: await runTool("browser_click", ["click", params.target]) }],
+        content: [
+          {
+            type: "text",
+            text: await runTool("browser_click", ["click", params.target], action),
+          },
+        ],
         details: {},
       }),
     }),
@@ -339,7 +640,7 @@ function createBrowserTools({
         content: [
           {
             type: "text",
-            text: await runTool("browser_type", ["type", params.target, params.text]),
+            text: await runTool("browser_type", ["type", params.target, params.text], action),
           },
         ],
         details: {},
@@ -353,7 +654,9 @@ function createBrowserTools({
         key: Type.String({ description: "Keyboard key" }),
       }),
       execute: async (_toolCallId, params) => ({
-        content: [{ type: "text", text: await runTool("browser_press", ["press", params.key]) }],
+        content: [
+          { type: "text", text: await runTool("browser_press", ["press", params.key], action) },
+        ],
         details: {},
       }),
     }),
@@ -369,11 +672,11 @@ function createBrowserTools({
         content: [
           {
             type: "text",
-            text: await runTool("browser_scroll", [
-              "scroll",
-              params.direction,
-              `${params.pixels ?? 700}`,
-            ]),
+            text: await runTool(
+              "browser_scroll",
+              ["scroll", params.direction, `${params.pixels ?? 700}`],
+              action,
+            ),
           },
         ],
         details: {},
@@ -387,7 +690,9 @@ function createBrowserTools({
         ms: Type.Number({ description: "Milliseconds to wait" }),
       }),
       execute: async (_toolCallId, params) => ({
-        content: [{ type: "text", text: await runTool("browser_wait", ["wait", `${params.ms}`]) }],
+        content: [
+          { type: "text", text: await runTool("browser_wait", ["wait", `${params.ms}`], action) },
+        ],
         details: {},
       }),
     }),
@@ -400,7 +705,7 @@ function createBrowserTools({
       }),
       execute: async (_toolCallId, params) => {
         const safeLabel = params.label.replace(/[^a-z0-9-_]/gi, "-").toLowerCase();
-        const fileName = `${persona.id}-${Date.now()}-${safeLabel}.png`;
+        const fileName = `${cellId}-${Date.now()}-${safeLabel}.png`;
         const screenshotPath = path.join(screenshotDir, fileName);
         const output = await runTool("browser_screenshot", [
           "screenshot",
@@ -408,7 +713,7 @@ function createBrowserTools({
         ]);
         const screenshotTakenAt = new Date().toISOString();
 
-        await updatePersonaRecord(runId, persona.id, (current) => ({
+        await updateCellRecord(runId, cellId, (current) => ({
           ...current,
           latestScreenshotFileName: fileName,
           latestScreenshotTakenAt: screenshotTakenAt,
@@ -481,6 +786,109 @@ Rules for the answers:
 - Be concrete about what you clicked, what happened, and what this persona wanted but did not get.
 - Do not include markdown, commentary, code fences, or extra keys.
 `.trim();
+}
+
+const SUBMIT_ALLOWED_RULE =
+  "- You may submit forms when the mission needs it (for example saving, sending a message). Never make purchases or payments, delete data, change passwords, email addresses or account settings, or log out.";
+const SUBMIT_FORBIDDEN_RULE =
+  "- Do not submit forms, make purchases, delete data, or change account settings. If the mission ends with a final submit, fill everything in, stop right before submitting, and count that as reaching the goal. Say so in evidence.quote.";
+
+function buildMissionPrompt(
+  persona: Persona,
+  scenario: Scenario,
+  url: string,
+  loggedIn: boolean,
+) {
+  return `
+${persona.prompt}
+
+You are testing this ${loggedIn ? "" : "public "}website live, starting at: ${url}
+${loggedIn ? LOGGED_IN_NOTE : ""}
+Your mission:
+${scenario.mission}
+
+You succeed when: ${scenario.successCriteria}
+
+Work towards the mission the way this persona naturally would. Do not act like a test script: take the paths this persona would take, and react to the product with this persona's experience level and patience (${persona.patience}).
+If this persona would realistically give up out of frustration or confusion, stop and report "gave_up". Giving up is a valid and valuable result.
+
+Constraints:
+- You may use only the browser tools.
+- Hard budget: ${scenario.maxSteps} browser actions (open, click, type, press, scroll, wait). Snapshots, screenshots, title and URL reads are free. When the budget is used up, actions fail; then stop and report.
+- There is also a fixed time budget. When time is up, tools fail; then stop and report.
+${scenario.allowSubmit ? SUBMIT_ALLOWED_RULE : SUBMIT_FORBIDDEN_RULE}
+- Use browser_snapshot whenever you need to decide what to click next.
+- Use browser_screenshot when something is notably good, bad, or confusing.
+
+When you are done, return only valid JSON in this exact shape:
+
+{
+  "verdict": "passed" | "failed" | "gave_up" | "limit_reached",
+  "evidence": {
+    "finalUrl": "URL of the page where you ended",
+    "quote": "exact text visible on that page that proves the outcome"
+  },
+  "frictionPoints": ["each moment you hesitated, got lost, or were annoyed, in one short sentence"],
+  "quote": "one sentence in this persona's voice that sums up the experience"
+}
+
+Verdict rules:
+- "passed" only if the success criterion is visibly met. Be honest; your claim is checked afterwards.
+- "failed" if you are convinced the goal cannot be reached on this site.
+- "gave_up" if this persona would stop trying.
+- "limit_reached" if the step or time budget ran out first.
+Do not include markdown, commentary, code fences, or extra keys.
+`.trim();
+}
+
+const VERDICT_LABELS: Record<CellReport["verdict"], string> = {
+  passed: "Passed",
+  failed: "Failed",
+  gave_up: "Gave up",
+  limit_reached: "Limit reached",
+  error: "Error",
+  skipped: "Skipped",
+};
+
+function buildCellReportMarkdown(title: string, scenario: Scenario, report: CellReport) {
+  const lines = [
+    `# ${title}`,
+    "",
+    `- **Verdict:** ${VERDICT_LABELS[report.verdict]}${report.misjudged ? ` (persona said: ${report.selfVerdict})` : ""}`,
+    `- **Steps:** ${report.stepsUsed} / ${report.maxSteps}`,
+    `- **Success criterion:** ${scenario.successCriteria}`,
+  ];
+
+  if (report.quote) {
+    lines.push(`- **Quote:** "${report.quote}"`);
+  }
+
+  if (report.evidence.finalUrl || report.evidence.quote) {
+    lines.push(
+      `- **Evidence:** ${[report.evidence.finalUrl, report.evidence.quote && `"${report.evidence.quote}"`].filter(Boolean).join(" – ")}`,
+    );
+  }
+
+  if (report.note) {
+    lines.push(`- **Note:** ${report.note}`);
+  }
+
+  if (report.frictionPoints.length > 0) {
+    lines.push("", "## Friction points", "", ...report.frictionPoints.map((item) => `- ${item}`));
+  }
+
+  if (report.assertionResults.length > 0) {
+    lines.push(
+      "",
+      "## Assertions",
+      "",
+      ...report.assertionResults.map(
+        (result) => `- ${result.passed ? "✅" : "❌"} ${result.type}: ${result.value}`,
+      ),
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
 }
 
 function parseStructuredSummary(rawText: string): PersonaReportInsight[] {
@@ -570,8 +978,8 @@ function buildSummaryMarkdown(
   return `# ${personaName}\n\n${bullets}\n`;
 }
 
-function getBrowserSessionName(runId: string, personaId: string) {
-  return `${runId}-${personaId}`;
+function getBrowserSessionName(runId: string, cellId: string) {
+  return `${runId}-${cellId}`;
 }
 
 const AGENT_BROWSER_TIMEOUT_MS = 90_000;
@@ -851,8 +1259,8 @@ async function verifyLogin(browserSession: string, login: PersonaLogin) {
   }
 }
 
-async function closeBrowserSession(runId: string, personaId: string) {
-  await runAgentBrowser(["--session", getBrowserSessionName(runId, personaId), "close"], {
+async function closeBrowserSession(browserSession: string) {
+  await runAgentBrowser(["--session", browserSession, "close"], {
     timeoutMs: 30_000,
   });
 }

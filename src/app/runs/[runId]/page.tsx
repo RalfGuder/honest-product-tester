@@ -18,12 +18,12 @@ export default async function RunPage({ params }: RunPageProps) {
     notFound();
   }
 
-  const { manifest, personaRuns } = run;
+  const { manifest, cells } = run;
 
   return (
     <div className={styles.page}>
       <main className={styles.main}>
-        <RunDetails initialRun={{ manifest, personaRuns }} />
+        <RunDetails initialRun={{ manifest, cells }} />
       </main>
     </div>
   );

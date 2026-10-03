@@ -1,0 +1,51 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+
+import { scenarioFromForm } from "@/lib/scenario-format";
+import { deleteScenario, saveScenario } from "@/lib/scenarios";
+
+export type ScenarioFormState = {
+  error?: string;
+  // Submitted text fields, so the form can be refilled after React resets it on error.
+  values?: Record<string, string>;
+  attempt: number;
+};
+
+const TEXT_FIELDS = ["title", "mission", "successCriteria", "targetHost", "startPath", "login", "maxSteps"];
+
+export async function saveScenarioAction(
+  previous: ScenarioFormState,
+  formData: FormData,
+): Promise<ScenarioFormState> {
+  const isNew = !formData.get("id");
+
+  try {
+    await saveScenario(scenarioFromForm(formData), { mustBeNew: isNew });
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : "Saving the scenario failed.",
+      values: Object.fromEntries(
+        TEXT_FIELDS.map((field) => [field, String(formData.get(field) ?? "")]),
+      ),
+      attempt: previous.attempt + 1,
+    };
+  }
+
+  revalidatePath("/scenarios");
+  revalidatePath("/");
+  redirect("/scenarios");
+}
+
+export async function deleteScenarioAction(formData: FormData) {
+  const id = formData.get("id");
+
+  if (typeof id === "string" && id) {
+    await deleteScenario(id);
+  }
+
+  revalidatePath("/scenarios");
+  revalidatePath("/");
+  redirect("/scenarios");
+}
