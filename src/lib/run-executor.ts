@@ -1,5 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import path from "node:path";
 
 import { Type } from "@sinclair/typebox";
@@ -12,6 +11,7 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
+import { getPersonaLogin, type BasicAuth, type PersonaLogin } from "@/lib/credentials";
 import { getPersonas, type Persona } from "@/lib/personas";
 import {
   appendPersonaAction,
@@ -27,16 +27,21 @@ import {
   type PersonaReportInsight,
 } from "@/lib/report-insights";
 
-const execFileAsync = promisify(execFile);
-const AGENT_BROWSER_BIN = path.join(
-  process.cwd(),
-  "node_modules",
-  ".bin",
-  "agent-browser",
-);
-const PERSONA_MODEL_PROVIDER = "openai";
-const PERSONA_MODEL_ID = "gpt-5.5";
-const PERSONA_MODEL_FALLBACK_ID = "gpt-5.4";
+// On Windows the .bin shim is a shell script that execFile cannot spawn,
+// so call the bundled native binary directly.
+const AGENT_BROWSER_BIN =
+  process.platform === "win32"
+    ? path.join(
+        process.cwd(),
+        "node_modules",
+        "agent-browser",
+        "bin",
+        "agent-browser-win32-x64.exe",
+      )
+    : path.join(process.cwd(), "node_modules", ".bin", "agent-browser");
+const PERSONA_MODEL_PROVIDER = "anthropic";
+const PERSONA_MODEL_ID = "claude-sonnet-4-5";
+const PERSONA_MODEL_FALLBACK_ID = "claude-opus-5-5";
 const activeRuns = globalThis.__honestProductTesterRuns ?? new Map<string, Promise<void>>();
 
 globalThis.__honestProductTesterRuns = activeRuns;
@@ -153,7 +158,22 @@ async function runPersona(runId: string, url: string, persona: Persona) {
   });
 
   try {
-    await session.prompt(buildPersonaPrompt(persona, url));
+    const login = await getPersonaLogin(persona.id);
+
+    if (login) {
+      await updatePersonaRecord(runId, persona.id, (current) => ({
+        ...current,
+        summary: `Logging in as ${login.username}.`,
+      }));
+      await loginPersona(browserSession, login);
+      await appendPersonaObservation(
+        runId,
+        persona.id,
+        `Logged in as ${login.username}.`,
+      );
+    }
+
+    await session.prompt(buildPersonaPrompt(persona, url, Boolean(login)));
 
     if (providerError) {
       throw new Error(providerError);
@@ -237,13 +257,7 @@ function createBrowserTools({
     const input = args.join(" ");
 
     try {
-      const result = await execFileAsync(
-        AGENT_BROWSER_BIN,
-        ["--session", browserSession, ...args],
-        {
-          maxBuffer: 1024 * 1024 * 8,
-        },
-      );
+      const result = await runAgentBrowser(["--session", browserSession, ...args]);
       const stdout = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
 
       await appendPersonaAction(runId, persona.id, {
@@ -430,7 +444,10 @@ function createBrowserTools({
   ];
 }
 
-function buildPersonaPrompt(persona: Persona, url: string) {
+const LOGGED_IN_NOTE =
+  "\nYou are already logged in with your own test account. Do not log out or change account settings.\n";
+
+function buildPersonaPrompt(persona: Persona, url: string, loggedIn: boolean) {
   const outputSchema = REPORT_INSIGHT_DEFINITIONS.map(
     ({ id, question }) => `  "${id}": "${question}"`,
   ).join("\n");
@@ -438,8 +455,8 @@ function buildPersonaPrompt(persona: Persona, url: string) {
   return `
 ${persona.prompt}
 
-You are testing this public website live: ${url}
-
+You are testing this ${loggedIn ? "" : "public "}website live: ${url}
+${loggedIn ? LOGGED_IN_NOTE : ""}
 Use the browser tools to inspect the product in the way this persona naturally would. Do not follow a generic script. Let your priorities, interests, impatience, and curiosity determine what to do next.
 
 Constraints:
@@ -508,11 +525,7 @@ function resolvePersonaModel(modelRegistry: ModelRegistry) {
     );
   }
 
-  return {
-    ...fallbackModel,
-    id: PERSONA_MODEL_ID,
-    name: "GPT-5.5",
-  };
+  return fallbackModel;
 }
 
 function getProviderError(event: AgentSessionEvent) {
@@ -561,12 +574,285 @@ function getBrowserSessionName(runId: string, personaId: string) {
   return `${runId}-${personaId}`;
 }
 
-async function closeBrowserSession(runId: string, personaId: string) {
-  await execFileAsync(
-    AGENT_BROWSER_BIN,
-    ["--session", getBrowserSessionName(runId, personaId), "close"],
-    {
-      maxBuffer: 1024 * 1024,
-    },
+const AGENT_BROWSER_TIMEOUT_MS = 90_000;
+
+// Resolves on "exit", not "close": the first command of a session spawns a daemon
+// that inherits stdout/stderr, so the pipes never close and "close" never fires.
+function runAgentBrowser(
+  args: string[],
+  { stdin, timeoutMs = AGENT_BROWSER_TIMEOUT_MS }: { stdin?: string; timeoutMs?: number } = {},
+) {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(AGENT_BROWSER_BIN, args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.destroy();
+      child.stderr.destroy();
+
+      if (error) {
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    };
+
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error(`agent-browser ${args.join(" ")} timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => finish(error));
+    child.on("exit", (code) => {
+      // Give buffered output a moment to arrive before the streams are destroyed.
+      setTimeout(() => {
+        finish(
+          code === 0
+            ? undefined
+            : new Error(
+                `agent-browser ${args.join(" ")} failed (${code}): ${(stderr || stdout).trim()}`,
+              ),
+        );
+      }, 50);
+    });
+
+    child.stdin.end(stdin ?? "");
+  });
+}
+
+// The auth vault is a shared file; serialize writes so parallel personas do not race on it.
+let authVaultQueue: Promise<unknown> = Promise.resolve();
+
+function withAuthVault<T>(task: () => Promise<T>) {
+  const next = authVaultQueue.then(task, task);
+
+  authVaultQueue = next.catch(() => undefined);
+
+  return next;
+}
+
+// Logs the browser session in before the agent starts, so the model never sees the password.
+async function loginPersona(browserSession: string, login: PersonaLogin) {
+  const saveArgs = [
+    "auth",
+    "save",
+    browserSession,
+    "--url",
+    login.loginUrl,
+    "--username",
+    login.username,
+    "--password-stdin",
+  ];
+
+  if (login.usernameSelector) {
+    saveArgs.push("--username-selector", login.usernameSelector);
+  }
+
+  if (login.passwordSelector) {
+    saveArgs.push("--password-selector", login.passwordSelector);
+  }
+
+  if (login.submitSelector) {
+    saveArgs.push("--submit-selector", login.submitSelector);
+  }
+
+  await withAuthVault(() =>
+    runAgentBrowser(["--session", browserSession, ...saveArgs], { stdin: login.password }),
   );
+
+  try {
+    if (login.basicAuth) {
+      await passBasicAuthGate(browserSession, login.loginUrl, login.basicAuth);
+    }
+
+    await submitLoginWithRetry(browserSession, login);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+
+    throw new Error(`Login as ${login.username} failed: ${message}`);
+  } finally {
+    await withAuthVault(() =>
+      runAgentBrowser(["--session", browserSession, "auth", "delete", browserSession]),
+    ).catch(() => undefined);
+  }
+}
+
+const LOGIN_CHECK_ATTEMPTS = 8;
+const LOGIN_CHECK_INTERVAL_MS = 1000;
+
+type LoginPageState = {
+  path: string;
+  appError: boolean;
+  marker: boolean | null;
+  alert: string;
+};
+
+async function readLoginPageState(
+  browserSession: string,
+  loggedInSelector: string | undefined,
+): Promise<LoginPageState> {
+  // #blazor-error-ui is the "An unhandled error has occurred" banner of Blazor apps.
+  const script = `(() => {
+    const banner = document.getElementById("blazor-error-ui");
+    const appError = !!banner && getComputedStyle(banner).display !== "none";
+    const selector = ${JSON.stringify(loggedInSelector ?? null)};
+    return JSON.stringify({
+      path: location.pathname,
+      appError,
+      marker: selector ? !!document.querySelector(selector) : null,
+      alert: [...document.querySelectorAll('[role="alert"]')]
+        .map((node) => node.textContent.trim())
+        .filter(Boolean)
+        .join(" ")
+        .slice(0, 200),
+    });
+  })()`;
+  const { stdout } = await runAgentBrowser(["--session", browserSession, "eval", script]);
+  let parsed: unknown = JSON.parse(stdout.trim());
+
+  // agent-browser prints string results JSON-quoted, so the payload may be encoded twice.
+  if (typeof parsed === "string") {
+    parsed = JSON.parse(parsed);
+  }
+
+  return parsed as LoginPageState;
+}
+
+// Answers the Basic Auth gate from Node and hands only the resulting gate cookies to the
+// browser. "agent-browser set credentials" would instead force Authorization: Basic onto
+// every request and overwrite the Bearer token the app sends to its own API.
+async function passBasicAuthGate(browserSession: string, loginUrl: string, basicAuth: BasicAuth) {
+  const authorization = `Basic ${Buffer.from(`${basicAuth.username}:${basicAuth.password}`).toString("base64")}`;
+  const response = await fetch(loginUrl, {
+    headers: { Authorization: authorization },
+    redirect: "manual",
+  });
+
+  if (response.status === 401) {
+    throw new Error("The HTTP Basic Auth gate rejected the configured basicAuth credentials.");
+  }
+
+  const cookies = response.headers.getSetCookie();
+
+  if (cookies.length === 0) {
+    // No gate cookie: fall back to browser-level credentials (may clash with Bearer APIs).
+    await runAgentBrowser([
+      "--session",
+      browserSession,
+      "set",
+      "credentials",
+      basicAuth.username,
+      basicAuth.password,
+    ]).catch(() => {
+      // Do not echo the command line: it contains the Basic Auth password.
+      throw new Error("Setting HTTP Basic Auth credentials failed.");
+    });
+    return;
+  }
+
+  const { origin } = new URL(loginUrl);
+
+  for (const cookie of cookies) {
+    const [pair, ...attributes] = cookie.split(";").map((part) => part.trim());
+    const separator = pair.indexOf("=");
+    const flags = attributes.map((attribute) => attribute.toLowerCase());
+    const args = [
+      "--session",
+      browserSession,
+      "cookies",
+      "set",
+      pair.slice(0, separator),
+      pair.slice(separator + 1),
+      "--url",
+      origin,
+    ];
+
+    if (flags.includes("httponly")) {
+      args.push("--httpOnly");
+    }
+
+    if (flags.includes("secure")) {
+      args.push("--secure");
+    }
+
+    await runAgentBrowser(args).catch(() => {
+      // Do not echo the command line: it contains the gate cookie value.
+      throw new Error(`Setting gate cookie ${pair.slice(0, separator)} failed.`);
+    });
+  }
+}
+
+class StillOnLoginPageError extends Error {
+  constructor(alert: string | undefined) {
+    super(
+      alert
+        ? `Still on the login page after submitting. The page says: "${alert}"`
+        : "Still on the login page after submitting. Check username, password and selectors.",
+    );
+  }
+}
+
+const LOGIN_ATTEMPTS = 2;
+
+// A client-side app may not be interactive yet when the form is submitted, so the click
+// is lost. Retry once when the page simply stayed on the login form.
+async function submitLoginWithRetry(browserSession: string, login: PersonaLogin) {
+  for (let attempt = 1; attempt <= LOGIN_ATTEMPTS; attempt += 1) {
+    await runAgentBrowser(["--session", browserSession, "auth", "login", browserSession]);
+
+    try {
+      await verifyLogin(browserSession, login);
+      return;
+    } catch (error) {
+      if (!(error instanceof StillOnLoginPageError) || attempt === LOGIN_ATTEMPTS) {
+        throw error;
+      }
+    }
+  }
+}
+
+// auth login reports success as soon as the form was submitted. Watch the page for a few
+// seconds and fail if it stays on the login page or the app shows its error banner.
+async function verifyLogin(browserSession: string, login: PersonaLogin) {
+  const loginPath = new URL(login.loginUrl).pathname.replace(/\/$/, "");
+  let state: LoginPageState | undefined;
+
+  for (let attempt = 0; attempt < LOGIN_CHECK_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, LOGIN_CHECK_INTERVAL_MS));
+    state = await readLoginPageState(browserSession, login.loggedInSelector);
+
+    if (state.appError) {
+      throw new Error(
+        `The app showed an unhandled error after login (page ${state.path}). Check the browser console of the site under test.`,
+      );
+    }
+  }
+
+  if (!state || state.path.replace(/\/$/, "") === loginPath) {
+    throw new StillOnLoginPageError(state?.alert);
+  }
+
+  if (state.marker === false) {
+    throw new Error(`Logged-in marker ${login.loggedInSelector} not found on ${state.path}.`);
+  }
+}
+
+async function closeBrowserSession(runId: string, personaId: string) {
+  await runAgentBrowser(["--session", getBrowserSessionName(runId, personaId), "close"], {
+    timeoutMs: 30_000,
+  });
 }
