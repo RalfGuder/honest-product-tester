@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCellPlan,
   DEFAULT_MAX_STEPS,
+  EXPLORE_SCENARIO,
+  isPersonaAssigned,
   matchesTargetHost,
   parseScenario,
   resolveStartUrl,
@@ -21,6 +24,7 @@ const sample: Scenario = {
   login: "required",
   allowSubmit: true,
   maxSteps: 12,
+  personas: ["sir-stack-overflow", "tom-thanks"],
   assertions: [
     { type: "url_contains", value: "/favorites" },
     { type: "text_visible", value: "Saved" },
@@ -52,9 +56,11 @@ describe("serializeScenario / parseScenario", () => {
       ...sample,
       targetHost: undefined,
       startPath: undefined,
+      personas: [],
       assertions: [],
     });
 
+    expect(raw).not.toContain("personas");
     expect(raw).not.toContain("target_host");
     expect(raw).not.toContain("start_path");
     expect(raw).not.toContain("assertions");
@@ -73,8 +79,18 @@ describe("serializeScenario / parseScenario", () => {
       login: "auto",
       allowSubmit: false,
       maxSteps: DEFAULT_MAX_STEPS,
+      personas: [],
       assertions: [],
     });
+  });
+
+  it("keeps only non-empty, unique persona ids", () => {
+    const parsed = parseScenario(
+      ["---", "title: P", "personas:", "  - tom-thanks", "  - ''", "  - 42", "  - tom-thanks", "---", "M"].join("\n"),
+      "p",
+    );
+
+    expect(parsed.personas).toEqual(["tom-thanks"]);
   });
 
   it("drops unknown login modes and invalid assertions", () => {
@@ -141,8 +157,22 @@ describe("scenarioFromForm", () => {
       login: "anonymous",
       allowSubmit: false,
       maxSteps: 8,
+      personas: [],
       assertions: [{ type: "url_contains", value: "/pricing" }],
     });
+  });
+
+  it("reads the assigned personas", () => {
+    const scenario = scenarioFromForm(
+      form({
+        title: "Admin",
+        mission: "m",
+        successCriteria: "c",
+        assignedPersona: ["sir-stack-overflow", "dark-muckerberg"],
+      }),
+    );
+
+    expect(scenario.personas).toEqual(["sir-stack-overflow", "dark-muckerberg"]);
   });
 
   it("keeps an existing id when editing", () => {
@@ -197,5 +227,35 @@ describe("resolveStartUrl", () => {
     expect(resolveStartUrl("https://example.com/app?x=1", "/favorites")).toBe(
       "https://example.com/favorites",
     );
+  });
+});
+
+describe("isPersonaAssigned", () => {
+  it("assigns every persona when the list is empty or missing", () => {
+    expect(isPersonaAssigned({ personas: [] }, "tom-thanks")).toBe(true);
+    expect(isPersonaAssigned({ personas: undefined }, "tom-thanks")).toBe(true);
+  });
+
+  it("assigns only listed personas", () => {
+    expect(isPersonaAssigned({ personas: ["tom-thanks"] }, "tom-thanks")).toBe(true);
+    expect(isPersonaAssigned({ personas: ["tom-thanks"] }, "cardi-confused")).toBe(false);
+  });
+});
+
+describe("buildCellPlan", () => {
+  const admin = { ...sample, id: "admin", personas: ["sir-stack-overflow"] };
+
+  it("pairs every selected persona with the scenarios assigned to it", () => {
+    const plan = buildCellPlan(["tom-thanks", "sir-stack-overflow"], [EXPLORE_SCENARIO, admin]);
+
+    expect(plan.map(({ personaId, scenario }) => `${personaId}:${scenario.id}`)).toEqual([
+      "tom-thanks:explore",
+      "sir-stack-overflow:explore",
+      "sir-stack-overflow:admin",
+    ]);
+  });
+
+  it("returns no cells when no selected persona is assigned", () => {
+    expect(buildCellPlan(["tom-thanks"], [admin])).toEqual([]);
   });
 });

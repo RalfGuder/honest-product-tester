@@ -30,6 +30,7 @@ import {
 } from "@/lib/report-insights";
 import {
   EXPLORE_SCENARIO_ID,
+  isPersonaAssigned,
   resolveStartUrl,
   type Scenario,
   type ScenarioAssertion,
@@ -133,7 +134,7 @@ async function runPersonaScenarios(
 ) {
   const errors: string[] = [];
 
-  for (const scenario of scenarios) {
+  for (const scenario of scenarios.filter((item) => isPersonaAssigned(item, persona.id))) {
     try {
       await runCell(runId, url, persona, scenario);
     } catch (error) {

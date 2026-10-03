@@ -202,7 +202,11 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
                             >
                               <MatrixCellContent cell={cell} />
                             </button>
-                          ) : null}
+                          ) : (
+                            <span className={styles.notAssigned} title="Not assigned">
+                              –
+                            </span>
+                          )}
                         </td>
                       );
                     })}

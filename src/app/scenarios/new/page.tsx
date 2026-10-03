@@ -1,9 +1,12 @@
 import Link from "next/link";
 
+import { getPersonas } from "@/lib/personas";
 import { ScenarioForm } from "../scenario-form";
 import styles from "../scenarios.module.css";
 
-export default function NewScenarioPage() {
+export default async function NewScenarioPage() {
+  const personas = await getPersonas();
+
   return (
     <div className={styles.page}>
       <main className={styles.main}>
@@ -13,7 +16,7 @@ export default function NewScenarioPage() {
           </Link>
           <h1 className={styles.title}>New scenario</h1>
         </div>
-        <ScenarioForm />
+        <ScenarioForm personas={personas.map(({ id, name }) => ({ id, name }))} />
       </main>
     </div>
   );

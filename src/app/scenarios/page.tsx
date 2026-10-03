@@ -1,12 +1,14 @@
 import Link from "next/link";
 import { connection } from "next/server";
 
+import { getPersonas } from "@/lib/personas";
 import { getScenarios } from "@/lib/scenarios";
 import styles from "./scenarios.module.css";
 
 export default async function ScenariosPage() {
   await connection();
-  const scenarios = await getScenarios();
+  const [scenarios, personas] = await Promise.all([getScenarios(), getPersonas()]);
+  const personaNames = new Map(personas.map((persona) => [persona.id, persona.name]));
 
   return (
     <div className={styles.page}>
@@ -35,6 +37,11 @@ export default async function ScenariosPage() {
                   <h2>{scenario.title}</h2>
                   <p>{scenario.successCriteria}</p>
                   <div className={styles.tags}>
+                    <span>
+                      {scenario.personas?.length
+                        ? `testers: ${scenario.personas.map((id) => personaNames.get(id) ?? id).join(", ")}`
+                        : "all testers"}
+                    </span>
                     <span>{scenario.targetHost ?? "any site"}</span>
                     <span>login: {scenario.login}</span>
                     <span>max {scenario.maxSteps} steps</span>

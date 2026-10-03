@@ -785,3 +785,8 @@
   overflow-wrap: anywhere;
   color: #3d3d3d;
 }
+
+.notAssigned {
+  padding: 2px 8px;
+  color: #9a9a9a;
+}

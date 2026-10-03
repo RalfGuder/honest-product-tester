@@ -4,6 +4,7 @@ import path from "node:path";
 import { comparePersonaIds, Persona } from "@/lib/personas";
 import type { PersonaReportInsight } from "@/lib/report-insights";
 import {
+  buildCellPlan,
   EXPLORE_SCENARIO,
   EXPLORE_SCENARIO_ID,
   type Scenario,
@@ -87,6 +88,17 @@ export async function createRun(url: string, personas: Persona[], scenarios: Sce
     throw new Error("Select at least one scenario.");
   }
 
+  const cellPlan = buildCellPlan(
+    personas.map((persona) => persona.id),
+    scenarios,
+  );
+
+  if (cellPlan.length === 0) {
+    throw new Error("None of the selected testers is assigned to the selected scenarios.");
+  }
+
+  const personasById = new Map(personas.map((persona) => [persona.id, persona]));
+
   const runId = createRunId();
   const runDir = path.join(runsDir, runId);
 
@@ -105,35 +117,34 @@ export async function createRun(url: string, personas: Persona[], scenarios: Sce
   await writeManifest(runId, manifest);
 
   await Promise.all(
-    personas.flatMap((persona) =>
-      scenarios.map(async (scenario) => {
-        const cellId = getCellId(persona.id, scenario.id);
-        const record: CellRunRecord = {
-          cellId,
-          personaId: persona.id,
-          personaName: persona.name,
-          personaAvatar: persona.avatar,
-          scenarioId: scenario.id,
-          scenarioTitle: scenario.title,
-          status: "queued",
-          summary: "Run created. Waiting for live execution.",
-          reportPath: path.join("cells", `${cellId}.md`),
-          observations: [
-            "Persona loaded from Markdown draft.",
-            `Scenario: ${scenario.title}.`,
-            "Live browser session has not started yet.",
-          ],
-          actions: [],
-        };
+    cellPlan.map(async ({ personaId, scenario }) => {
+      const persona = personasById.get(personaId)!;
+      const cellId = getCellId(persona.id, scenario.id);
+      const record: CellRunRecord = {
+        cellId,
+        personaId: persona.id,
+        personaName: persona.name,
+        personaAvatar: persona.avatar,
+        scenarioId: scenario.id,
+        scenarioTitle: scenario.title,
+        status: "queued",
+        summary: "Run created. Waiting for live execution.",
+        reportPath: path.join("cells", `${cellId}.md`),
+        observations: [
+          "Persona loaded from Markdown draft.",
+          `Scenario: ${scenario.title}.`,
+          "Live browser session has not started yet.",
+        ],
+        actions: [],
+      };
 
-        await writeCellRecord(runId, cellId, record);
-        await writeCellReport(
-          runId,
-          cellId,
-          `# ${persona.name} – ${scenario.title}\n\nStatus: queued\n\nThis run was initialized and is waiting to start.\n`,
-        );
-      }),
-    ),
+      await writeCellRecord(runId, cellId, record);
+      await writeCellReport(
+        runId,
+        cellId,
+        `# ${persona.name} – ${scenario.title}\n\nStatus: queued\n\nThis run was initialized and is waiting to start.\n`,
+      );
+    }),
   );
 
   return manifest;

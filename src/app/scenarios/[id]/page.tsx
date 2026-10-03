@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { getPersonas } from "@/lib/personas";
 import { EXPLORE_SCENARIO_ID } from "@/lib/scenario-format";
 import { getScenario } from "@/lib/scenarios";
 import { deleteScenarioAction } from "../actions";
@@ -23,6 +24,8 @@ export default async function ScenarioPage({ params }: ScenarioPageProps) {
     notFound();
   }
 
+  const personas = await getPersonas();
+
   return (
     <div className={styles.page}>
       <main className={styles.main}>
@@ -36,7 +39,10 @@ export default async function ScenarioPage({ params }: ScenarioPageProps) {
             <DeleteScenarioButton title={scenario.title} />
           </form>
         </div>
-        <ScenarioForm scenario={scenario} />
+        <ScenarioForm
+          scenario={scenario}
+          personas={personas.map(({ id, name }) => ({ id, name }))}
+        />
       </main>
     </div>
   );

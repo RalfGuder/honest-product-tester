@@ -25,6 +25,8 @@ export type Scenario = {
   login: ScenarioLoginMode;
   allowSubmit: boolean;
   maxSteps: number;
+  // Persona ids this scenario is meant for. Empty or missing = every persona.
+  personas?: string[];
   assertions: ScenarioAssertion[];
 };
 
@@ -37,6 +39,7 @@ export const EXPLORE_SCENARIO: Scenario = {
   login: "auto",
   allowSubmit: false,
   maxSteps: DEFAULT_MAX_STEPS,
+  personas: [],
   assertions: [],
 };
 
@@ -71,6 +74,22 @@ export function matchesTargetHost(scenario: Pick<Scenario, "targetHost">, runUrl
   const target = scenario.targetHost.toLowerCase();
 
   return hostname === target || hostname.endsWith(`.${target}`);
+}
+
+export function isPersonaAssigned(scenario: Pick<Scenario, "personas">, personaId: string) {
+  return !scenario.personas?.length || scenario.personas.includes(personaId);
+}
+
+/** The persona × scenario cells of a run: every selected persona with its assigned scenarios. */
+export function buildCellPlan<S extends Pick<Scenario, "personas">>(
+  personaIds: string[],
+  scenarios: S[],
+) {
+  return personaIds.flatMap((personaId) =>
+    scenarios
+      .filter((scenario) => isPersonaAssigned(scenario, personaId))
+      .map((scenario) => ({ personaId, scenario })),
+  );
 }
 
 export function resolveStartUrl(runUrl: string, startPath: string | undefined) {

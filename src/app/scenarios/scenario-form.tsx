@@ -25,8 +25,16 @@ const ASSERTION_LABELS: Record<ScenarioAssertion["type"], string> = {
 
 const initialState: ScenarioFormState = { attempt: 0 };
 
-export function ScenarioForm({ scenario }: { scenario?: Scenario }) {
+type ScenarioFormProps = {
+  scenario?: Scenario;
+  personas: { id: string; name: string }[];
+};
+
+export function ScenarioForm({ scenario, personas }: ScenarioFormProps) {
   const [state, formAction, pending] = useActionState(saveScenarioAction, initialState);
+  const [assignedPersonas, setAssignedPersonas] = useState<Set<string>>(
+    () => new Set(scenario?.personas ?? []),
+  );
   const [assertions, setAssertions] = useState<ScenarioAssertion[]>(
     scenario?.assertions ?? [],
   );
@@ -106,6 +114,43 @@ export function ScenarioForm({ scenario }: { scenario?: Scenario }) {
           />
         </label>
       </div>
+
+      <fieldset className={styles.assertions}>
+        <legend>Assigned testers</legend>
+        <p className={styles.hint}>
+          {assignedPersonas.size === 0
+            ? "No tester selected: every tester works through this scenario."
+            : "Only the selected testers work through this scenario."}
+        </p>
+        <div className={styles.personaChoices}>
+          {personas.map((persona) => (
+            <label key={persona.id} className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                name="assignedPersona"
+                value={persona.id}
+                checked={assignedPersonas.has(persona.id)}
+                onChange={(event) => {
+                  const { checked } = event.target;
+
+                  setAssignedPersonas((current) => {
+                    const next = new Set(current);
+
+                    if (checked) {
+                      next.add(persona.id);
+                    } else {
+                      next.delete(persona.id);
+                    }
+
+                    return next;
+                  });
+                }}
+              />
+              <span>{persona.name}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
       <label className={styles.checkboxField}>
         <input
