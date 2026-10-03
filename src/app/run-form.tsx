@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useState } from "react";
 
 import {
+  buildCellPlan,
   EXPLORE_SCENARIO,
+  isPersonaAssigned,
   matchesTargetHost,
   type Scenario,
 } from "@/lib/scenario-model";
@@ -13,7 +15,7 @@ import styles from "./page.module.css";
 type RunFormProps = {
   action: (formData: FormData) => Promise<void>;
   personas: { id: string; name: string }[];
-  scenarios: Pick<Scenario, "id" | "title" | "targetHost" | "allowSubmit">[];
+  scenarios: Pick<Scenario, "id" | "title" | "targetHost" | "allowSubmit" | "personas">[];
 };
 
 export function RunForm({ action, personas, scenarios }: RunFormProps) {
@@ -28,7 +30,14 @@ export function RunForm({ action, personas, scenarios }: RunFormProps) {
   const allScenarios = [EXPLORE_SCENARIO, ...scenarios];
   const matching = allScenarios.filter((scenario) => matchesTargetHost(scenario, url));
   const others = allScenarios.filter((scenario) => !matchesTargetHost(scenario, url));
-  const cellCount = selectedScenarios.size * selectedPersonas.size;
+  const personaNames = new Map(personas.map((persona) => [persona.id, persona.name]));
+  const chosenScenarios = allScenarios.filter((scenario) => selectedScenarios.has(scenario.id));
+  const cellCount = buildCellPlan([...selectedPersonas], chosenScenarios).length;
+  // Selected scenarios that none of the selected testers is assigned to.
+  const unstaffed = chosenScenarios.filter(
+    (scenario) =>
+      ![...selectedPersonas].some((personaId) => isPersonaAssigned(scenario, personaId)),
+  );
   const submits = allScenarios.some(
     (scenario) => scenario.allowSubmit && selectedScenarios.has(scenario.id),
   );
@@ -59,6 +68,11 @@ export function RunForm({ action, personas, scenarios }: RunFormProps) {
       <span>{scenario.title}</span>
       {scenario.targetHost ? (
         <span className={styles.choiceHint}>{scenario.targetHost}</span>
+      ) : null}
+      {scenario.personas?.length ? (
+        <span className={styles.choiceHint}>
+          only {scenario.personas.map((id) => personaNames.get(id) ?? id).join(", ")}
+        </span>
       ) : null}
     </label>
   );
@@ -117,8 +131,14 @@ export function RunForm({ action, personas, scenarios }: RunFormProps) {
 
       <p className={styles.formNote}>
         {cellCount === 0
-          ? "Select at least one scenario and one tester."
-          : `${selectedPersonas.size} tester${selectedPersonas.size === 1 ? "" : "s"} × ${selectedScenarios.size} scenario${selectedScenarios.size === 1 ? "" : "s"} = ${cellCount} test run${cellCount === 1 ? "" : "s"}.`}
+          ? "Select at least one scenario and a tester assigned to it."
+          : `${cellCount} test run${cellCount === 1 ? "" : "s"} (${selectedPersonas.size} tester${selectedPersonas.size === 1 ? "" : "s"}, ${selectedScenarios.size} scenario${selectedScenarios.size === 1 ? "" : "s"}).`}
+        {unstaffed.length > 0 ? (
+          <strong className={styles.formWarning}>
+            {" "}
+            No selected tester is assigned to: {unstaffed.map((scenario) => scenario.title).join(", ")}.
+          </strong>
+        ) : null}
         {submits ? (
           <strong className={styles.formWarning}>
             {" "}

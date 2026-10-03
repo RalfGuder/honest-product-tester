@@ -24,6 +24,7 @@ type ScenarioFrontmatter = {
   login?: unknown;
   allow_submit?: unknown;
   max_steps?: unknown;
+  personas?: unknown;
   assertions?: unknown;
 };
 
@@ -41,6 +42,7 @@ export function parseScenario(raw: string, fallbackId: string): Scenario {
     login: asLoginMode(frontmatter.login),
     allowSubmit: frontmatter.allow_submit === true,
     maxSteps: asMaxSteps(frontmatter.max_steps),
+    personas: asIdList(frontmatter.personas),
     assertions: asAssertions(frontmatter.assertions),
   };
 }
@@ -63,6 +65,10 @@ export function serializeScenario(scenario: Scenario) {
   frontmatter.login = scenario.login;
   frontmatter.allow_submit = scenario.allowSubmit;
   frontmatter.max_steps = scenario.maxSteps;
+
+  if (scenario.personas?.length) {
+    frontmatter.personas = [...scenario.personas];
+  }
 
   if (scenario.assertions.length > 0) {
     frontmatter.assertions = scenario.assertions.map(({ type, value }) => ({ type, value }));
@@ -112,6 +118,7 @@ export function scenarioFromForm(formData: FormData): Scenario {
     login: asLoginMode(formText(formData, "login")),
     allowSubmit: formData.get("allowSubmit") === "on",
     maxSteps: asMaxSteps(Number.parseInt(formText(formData, "maxSteps"), 10)),
+    personas: asIdList(formData.getAll("assignedPersona")),
     assertions: asAssertions(
       assertionTypes.map((type, index) => ({ type, value: assertionValues[index] ?? "" })),
     ),
@@ -160,6 +167,14 @@ function asMaxSteps(value: unknown) {
   }
 
   return Math.min(value, MAX_STEPS_LIMIT);
+}
+
+function asIdList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.map(asText).filter(Boolean))];
 }
 
 function asAssertions(value: unknown): ScenarioAssertion[] {

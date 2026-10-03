@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { getPersonas } from "@/lib/personas";
 import { scenarioFromForm } from "@/lib/scenario-format";
 import { deleteScenario, saveScenario } from "@/lib/scenarios";
 
@@ -22,7 +23,13 @@ export async function saveScenarioAction(
   const isNew = !formData.get("id");
 
   try {
-    await saveScenario(scenarioFromForm(formData), { mustBeNew: isNew });
+    const scenario = scenarioFromForm(formData);
+    const knownIds = new Set((await getPersonas()).map((persona) => persona.id));
+
+    await saveScenario(
+      { ...scenario, personas: scenario.personas?.filter((id) => knownIds.has(id)) },
+      { mustBeNew: isNew },
+    );
   } catch (error) {
     return {
       error: error instanceof Error ? error.message : "Saving the scenario failed.",

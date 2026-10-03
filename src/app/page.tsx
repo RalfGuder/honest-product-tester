@@ -33,11 +33,12 @@ export default async function Home() {
           <RunForm
             action={startRunAction}
             personas={personas.map(({ id, name }) => ({ id, name }))}
-            scenarios={scenarios.map(({ id, title, targetHost, allowSubmit }) => ({
+            scenarios={scenarios.map(({ id, title, targetHost, allowSubmit, personas: assigned }) => ({
               id,
               title,
               targetHost,
               allowSubmit,
+              personas: assigned,
             }))}
           />
         </section>
