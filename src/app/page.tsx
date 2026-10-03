@@ -1,10 +1,16 @@
+import { connection } from "next/server";
+
 import { startRunAction } from "@/app/actions";
 import { HomeClient } from "@/app/home-client";
+import { RunForm } from "@/app/run-form";
 import { getPersonas } from "@/lib/personas";
+import { getScenarios } from "@/lib/scenarios";
 import styles from "./page.module.css";
 
 export default async function Home() {
-  const personas = await getPersonas();
+  // Scenarios are edited at runtime, so render on every request.
+  await connection();
+  const [personas, scenarios] = await Promise.all([getPersonas(), getScenarios()]);
 
   return (
     <div className={styles.page}>
@@ -24,24 +30,16 @@ export default async function Home() {
         </section>
 
         <section id="ux-test-form" className={styles.formSection}>
-          <form className={styles.form} action={startRunAction}>
-            <label className={styles.label} htmlFor="url">
-              Website URL
-            </label>
-            <div className={styles.inputRow}>
-              <input
-                id="url"
-                name="url"
-                type="url"
-                className={styles.input}
-                placeholder="https://your-site.com"
-                required
-              />
-              <button className={styles.submitButton} type="submit">
-                TEST
-              </button>
-            </div>
-          </form>
+          <RunForm
+            action={startRunAction}
+            personas={personas.map(({ id, name }) => ({ id, name }))}
+            scenarios={scenarios.map(({ id, title, targetHost, allowSubmit }) => ({
+              id,
+              title,
+              targetHost,
+              allowSubmit,
+            }))}
+          />
         </section>
 
         <HomeClient personas={personas} />

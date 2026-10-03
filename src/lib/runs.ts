@@ -3,15 +3,18 @@ import path from "node:path";
 
 import { comparePersonaIds, Persona } from "@/lib/personas";
 import type { PersonaReportInsight } from "@/lib/report-insights";
+import {
+  EXPLORE_SCENARIO,
+  EXPLORE_SCENARIO_ID,
+  type Scenario,
+} from "@/lib/scenario-format";
+import type { CellReport } from "@/lib/scenario-verdict";
+import { queueWrite } from "@/lib/write-queue";
 
 type OrchestrationMode = "sequential" | "parallel";
 
 export type RunStatus = "queued" | "running" | "completed" | "failed";
-export type PersonaRunStatus =
-  | "queued"
-  | "running"
-  | "completed"
-  | "failed";
+export type CellRunStatus = "queued" | "running" | "completed" | "failed" | "skipped";
 
 export type RunManifest = {
   id: string;
@@ -22,6 +25,8 @@ export type RunManifest = {
   status: RunStatus;
   orchestration: OrchestrationMode;
   personas: string[];
+  // Snapshot of the scenarios at run start. Missing in runs created before scenarios existed.
+  scenarios?: Scenario[];
   currentPersonaId?: string;
   error?: string;
 };
@@ -33,18 +38,25 @@ export type PersonaAction = {
   outcome: "success" | "error";
 };
 
-export type PersonaRunRecord = {
+/** One persona working through one scenario. */
+export type CellRunRecord = {
+  cellId: string;
   personaId: string;
   personaName: string;
   personaAvatar: string;
-  status: PersonaRunStatus;
+  scenarioId: string;
+  scenarioTitle: string;
+  status: CellRunStatus;
   summary: string;
   reportPath: string;
   observations: string[];
   actions: PersonaAction[];
   latestScreenshotFileName?: string;
   latestScreenshotTakenAt?: string;
+  // Free exploration only: the four insight answers.
   structuredSummary?: PersonaReportInsight[];
+  // Mission scenarios only: verdict and evidence.
+  cellReport?: CellReport;
   finalReport?: string;
   error?: string;
   startedAt?: string;
@@ -53,22 +65,30 @@ export type PersonaRunRecord = {
 };
 
 const runsDir = path.join(process.cwd(), "data", "runs");
-const writeQueues =
-  globalThis.__honestProductTesterWriteQueues ?? new Map<string, Promise<unknown>>();
 
-globalThis.__honestProductTesterWriteQueues = writeQueues;
-
-declare global {
-  var __honestProductTesterWriteQueues: Map<string, Promise<unknown>> | undefined;
+export function getCellId(personaId: string, scenarioId: string) {
+  return `${personaId}__${scenarioId}`;
 }
 
-export async function createRun(url: string, personas: Persona[]) {
+/** Scenarios of a run; runs created before scenarios existed were free exploration only. */
+export function getRunScenarios(manifest: RunManifest) {
+  return manifest.scenarios?.length ? manifest.scenarios : [EXPLORE_SCENARIO];
+}
+
+export async function createRun(url: string, personas: Persona[], scenarios: Scenario[]) {
   const trimmedUrl = url.trim();
   const parsedUrl = validatePublicUrl(trimmedUrl);
+
+  if (personas.length === 0) {
+    throw new Error("Select at least one persona.");
+  }
+
+  if (scenarios.length === 0) {
+    throw new Error("Select at least one scenario.");
+  }
+
   const runId = createRunId();
   const runDir = path.join(runsDir, runId);
-  const personaDir = path.join(runDir, "personas");
-  const screenshotDir = path.join(runDir, "screenshots");
 
   const manifest: RunManifest = {
     id: runId,
@@ -77,73 +97,77 @@ export async function createRun(url: string, personas: Persona[]) {
     status: "queued",
     orchestration: "parallel",
     personas: personas.map((persona) => persona.id),
+    scenarios,
   };
 
-  await fs.mkdir(personaDir, { recursive: true });
-  await fs.mkdir(screenshotDir, { recursive: true });
+  await fs.mkdir(path.join(runDir, "cells"), { recursive: true });
+  await fs.mkdir(path.join(runDir, "screenshots"), { recursive: true });
   await writeManifest(runId, manifest);
 
   await Promise.all(
-    personas.map(async (persona) => {
-      const reportPath = path.join("personas", `${persona.id}.md`);
-      const record: PersonaRunRecord = {
-        personaId: persona.id,
-        personaName: persona.name,
-        personaAvatar: persona.avatar,
-        status: "queued",
-        summary: "Run created. Waiting for live execution.",
-        reportPath,
-        observations: [
-          "Persona loaded from Markdown draft.",
-          "Parallel execution is enabled for this run.",
-          "Live browser session has not started yet.",
-        ],
-        actions: [],
-      };
+    personas.flatMap((persona) =>
+      scenarios.map(async (scenario) => {
+        const cellId = getCellId(persona.id, scenario.id);
+        const record: CellRunRecord = {
+          cellId,
+          personaId: persona.id,
+          personaName: persona.name,
+          personaAvatar: persona.avatar,
+          scenarioId: scenario.id,
+          scenarioTitle: scenario.title,
+          status: "queued",
+          summary: "Run created. Waiting for live execution.",
+          reportPath: path.join("cells", `${cellId}.md`),
+          observations: [
+            "Persona loaded from Markdown draft.",
+            `Scenario: ${scenario.title}.`,
+            "Live browser session has not started yet.",
+          ],
+          actions: [],
+        };
 
-      const report = `# ${persona.name}\n\nStatus: queued\n\nThis run was initialized and is waiting to start.\n`;
-
-      await writePersonaRecord(runId, persona.id, record);
-      await writePersonaReport(runId, persona.id, report);
-    }),
+        await writeCellRecord(runId, cellId, record);
+        await writeCellReport(
+          runId,
+          cellId,
+          `# ${persona.name} – ${scenario.title}\n\nStatus: queued\n\nThis run was initialized and is waiting to start.\n`,
+        );
+      }),
+    ),
   );
 
   return manifest;
 }
 
 export async function getRun(runId: string) {
-  const runDir = path.join(runsDir, runId);
-  const manifestPath = path.join(runDir, "manifest.json");
-  const personaDir = path.join(runDir, "personas");
+  const manifest = await readManifest(runId);
+  const cellDir = path.join(runsDir, runId, "cells");
+  const legacy = !(await exists(cellDir));
+  const recordDir = legacy ? path.join(runsDir, runId, "personas") : cellDir;
+  const recordFiles = (await fs.readdir(recordDir)).filter((file) => file.endsWith(".json"));
 
-  const manifest = JSON.parse(
-    await fs.readFile(manifestPath, "utf8"),
-  ) as RunManifest;
+  const cells = await Promise.all(
+    recordFiles.map(async (file) => {
+      const record = JSON.parse(
+        await fs.readFile(path.join(recordDir, file), "utf8"),
+      ) as CellRunRecord;
 
-  const personaFiles = (await fs.readdir(personaDir))
-    .filter((file) => file.endsWith(".json"))
-    .sort();
-
-  const personaRuns = await Promise.all(
-    personaFiles.map(async (file) => {
-      const fullPath = path.join(personaDir, file);
-      return JSON.parse(await fs.readFile(fullPath, "utf8")) as PersonaRunRecord;
+      return legacy ? upgradeLegacyRecord(record) : record;
     }),
   );
 
-  personaRuns.sort((left, right) => {
-    const indexDelta = comparePersonaIds(left.personaId, right.personaId);
+  const scenarioOrder = getRunScenarios(manifest).map((scenario) => scenario.id);
 
-    if (indexDelta !== 0) {
-      return indexDelta;
-    }
-
-    return left.personaName.localeCompare(right.personaName);
-  });
+  cells.sort(
+    (left, right) =>
+      comparePersonaIds(left.personaId, right.personaId) ||
+      left.personaName.localeCompare(right.personaName) ||
+      scenarioOrder.indexOf(left.scenarioId) - scenarioOrder.indexOf(right.scenarioId),
+  );
 
   return {
     manifest,
-    personaRuns,
+    cells,
   };
 }
 
@@ -151,7 +175,7 @@ export async function updateRunManifest(
   runId: string,
   updater: (current: RunManifest) => RunManifest,
 ) {
-  return queueWrite(getManifestQueueKey(runId), async () => {
+  return queueWrite(`manifest:${runId}`, async () => {
     const current = await readManifest(runId);
     const next = updater(current);
     await writeManifest(runId, next);
@@ -159,52 +183,61 @@ export async function updateRunManifest(
   });
 }
 
-export async function updatePersonaRecord(
+export async function updateCellRecord(
   runId: string,
-  personaId: string,
-  updater: (current: PersonaRunRecord) => PersonaRunRecord,
+  cellId: string,
+  updater: (current: CellRunRecord) => CellRunRecord,
 ) {
-  return queueWrite(getPersonaQueueKey(runId, personaId), async () => {
-    const current = await readPersonaRecord(runId, personaId);
+  return queueWrite(`cell:${runId}:${cellId}`, async () => {
+    const current = await readCellRecord(runId, cellId);
     const next = updater(current);
-    await writePersonaRecord(runId, personaId, next);
+    await writeCellRecord(runId, cellId, next);
     return next;
   });
 }
 
-export async function appendPersonaObservation(
+export async function appendCellObservation(
   runId: string,
-  personaId: string,
+  cellId: string,
   observation: string,
 ) {
-  return updatePersonaRecord(runId, personaId, (current) => ({
+  return updateCellRecord(runId, cellId, (current) => ({
     ...current,
     observations: [observation, ...current.observations].slice(0, 12),
   }));
 }
 
-export async function appendPersonaAction(
-  runId: string,
-  personaId: string,
-  action: PersonaAction,
-) {
-  return updatePersonaRecord(runId, personaId, (current) => ({
+export async function appendCellAction(runId: string, cellId: string, action: PersonaAction) {
+  return updateCellRecord(runId, cellId, (current) => ({
     ...current,
     actions: [action, ...current.actions].slice(0, 20),
   }));
 }
 
-export async function writePersonaReport(
-  runId: string,
-  personaId: string,
-  markdown: string,
-) {
-  const reportPath = path.join(runsDir, runId, "personas", `${personaId}.md`);
-  await fs.writeFile(reportPath, markdown, "utf8");
+export async function writeCellReport(runId: string, cellId: string, markdown: string) {
+  await fs.writeFile(path.join(runsDir, runId, "cells", `${cellId}.md`), markdown, "utf8");
 }
 
 export function getScreenshotDir(runId: string) {
   return path.join(runsDir, runId, "screenshots");
+}
+
+function upgradeLegacyRecord(record: CellRunRecord): CellRunRecord {
+  return {
+    ...record,
+    cellId: getCellId(record.personaId, EXPLORE_SCENARIO_ID),
+    scenarioId: EXPLORE_SCENARIO_ID,
+    scenarioTitle: EXPLORE_SCENARIO.title,
+  };
+}
+
+async function exists(filePath: string) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readManifest(runId: string) {
@@ -217,52 +250,25 @@ async function writeManifest(runId: string, manifest: RunManifest) {
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
 }
 
-async function readPersonaRecord(runId: string, personaId: string) {
-  const recordPath = path.join(runsDir, runId, "personas", `${personaId}.json`);
-  return JSON.parse(await fs.readFile(recordPath, "utf8")) as PersonaRunRecord;
+async function readCellRecord(runId: string, cellId: string) {
+  const recordPath = path.join(runsDir, runId, "cells", `${cellId}.json`);
+  return JSON.parse(await fs.readFile(recordPath, "utf8")) as CellRunRecord;
 }
 
-async function writePersonaRecord(
-  runId: string,
-  personaId: string,
-  record: PersonaRunRecord,
-) {
-  const recordPath = path.join(runsDir, runId, "personas", `${personaId}.json`);
+async function writeCellRecord(runId: string, cellId: string, record: CellRunRecord) {
+  const recordPath = path.join(runsDir, runId, "cells", `${cellId}.json`);
   await fs.writeFile(
     recordPath,
     JSON.stringify(
       {
         ...record,
         updatedAt: new Date().toISOString(),
-      } satisfies PersonaRunRecord,
+      } satisfies CellRunRecord,
       null,
       2,
     ),
     "utf8",
   );
-}
-
-function getManifestQueueKey(runId: string) {
-  return `manifest:${runId}`;
-}
-
-function getPersonaQueueKey(runId: string, personaId: string) {
-  return `persona:${runId}:${personaId}`;
-}
-
-async function queueWrite<T>(key: string, task: () => Promise<T>) {
-  const previous = writeQueues.get(key) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(task);
-
-  writeQueues.set(key, next);
-
-  try {
-    return await next;
-  } finally {
-    if (writeQueues.get(key) === next) {
-      writeQueues.delete(key);
-    }
-  }
 }
 
 function createRunId() {

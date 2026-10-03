@@ -625,3 +625,163 @@
     max-height: 112px;
   }
 }
+
+.matrixWrap {
+  flex-shrink: 0;
+  max-height: 34vh;
+  overflow: auto;
+  border: 1px solid #111111;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.matrix th,
+.matrix td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(17, 17, 17, 0.12);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.matrix thead th {
+  position: sticky;
+  top: 0;
+  background: #ffffff;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #5f5f5f;
+}
+
+.matrix thead th button {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.matrix [data-selected="true"] {
+  background: rgba(255, 69, 0, 0.07);
+}
+
+.matrix thead th[data-selected="true"] {
+  color: #c2410c;
+  box-shadow: inset 0 -2px 0 #ff4500;
+}
+
+.matrix tfoot th,
+.matrix tfoot td {
+  border-bottom: 0;
+  font-weight: 700;
+}
+
+.matrixCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-transform: capitalize;
+}
+
+.matrixCell:hover,
+.matrixCell:focus-visible {
+  border-color: rgba(17, 17, 17, 0.3);
+}
+
+.matrixCell[data-verdict="passed"],
+.verdictLine[data-verdict="passed"] {
+  color: #1f7a3e;
+}
+
+.matrixCell[data-verdict="failed"],
+.matrixCell[data-verdict="error"],
+.verdictLine[data-verdict="failed"],
+.verdictLine[data-verdict="error"] {
+  color: #b42300;
+}
+
+.matrixCell[data-verdict="gave_up"],
+.matrixCell[data-verdict="limit_reached"],
+.verdictLine[data-verdict="gave_up"],
+.verdictLine[data-verdict="limit_reached"] {
+  color: #9a5b00;
+}
+
+.matrixCell[data-verdict="skipped"],
+.verdictLine[data-verdict="skipped"] {
+  color: #666666;
+}
+
+.matrixSteps {
+  font-size: 0.75rem;
+  color: #666666;
+  font-variant-numeric: tabular-nums;
+}
+
+.personaCard[data-status="skipped"] .queueBadge {
+  color: #666666;
+}
+
+.verdictLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+}
+
+.misjudged,
+.reportNote {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.misjudged {
+  border: 1px solid #b42300;
+  background: #fff1ec;
+  color: #8a1c00;
+}
+
+.reportNote {
+  border: 1px solid rgba(17, 17, 17, 0.15);
+  background: rgba(17, 17, 17, 0.03);
+  color: #3d3d3d;
+}
+
+.personaQuote {
+  margin: 0;
+  padding: 4px 0 4px 12px;
+  border-left: 3px solid #ff4500;
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.frictionList {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.evidenceUrl {
+  margin: 0;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+  color: #3d3d3d;
+}
