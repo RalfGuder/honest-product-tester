@@ -202,6 +202,10 @@ export const de: Dictionary = {
     runFailed: "Provil-Lauf fehlgeschlagen.",
     loginRequiredNoFile: "Das Szenario erfordert einen Login, aber es gibt keine Zugangsdaten-Datei.",
     loginRequiredError: "Das Szenario erfordert einen Login: {error}",
+    loginSkippedOtherHost:
+      "Zugangsdaten gelten für {loginHost}, Ziel ist {targetHost} – Erkundung ohne Login.",
+    loginRequiredWrongHost:
+      "Das Szenario erfordert einen Login, aber die Zugangsdaten gelten für {loginHost}, nicht für {targetHost}.",
     timeBudgetUsed: "Das Zeitbudget von {minutes} Minuten ist abgelaufen.",
     stepBudgetUsed: "Das Schrittbudget von {steps} Browser-Aktionen ist aufgebraucht.",
     idleStopped: "{minutes} Minuten keine Aktivität – die Session wurde abgebrochen.",

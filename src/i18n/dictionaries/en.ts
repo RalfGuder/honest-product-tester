@@ -203,6 +203,10 @@ export const en = {
     runFailed: "Persona run failed.",
     loginRequiredNoFile: "Scenario requires a login, but no credentials file exists.",
     loginRequiredError: "Scenario requires a login: {error}",
+    loginSkippedOtherHost:
+      "Credentials are for {loginHost}, target is {targetHost} – exploring without login.",
+    loginRequiredWrongHost:
+      "Scenario requires a login, but the credentials are for {loginHost}, not {targetHost}.",
     timeBudgetUsed: "Time budget of {minutes} minutes ran out.",
     stepBudgetUsed: "Step budget of {steps} browser actions was used up.",
     idleStopped: "No activity for {minutes} minutes – the session was stopped.",

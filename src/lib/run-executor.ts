@@ -210,11 +210,15 @@ async function runCell(
   }));
   await appendCellObservation(runId, cellId, { key: "runStarted" });
 
-  const login = await resolveCellLogin(persona, scenario);
+  const login = await resolveCellLogin(persona, scenario, startUrl);
 
   if (login.skipReason) {
     await skipCell(runId, cellId, scenario, reportTitle, login.skipReason, reportDictionary);
     return;
+  }
+
+  if (login.notice) {
+    await appendCellObservation(runId, cellId, login.notice);
   }
 
   const screenshotDir = getScreenshotDir(runId);
@@ -421,19 +425,38 @@ async function runCell(
 async function resolveCellLogin(
   persona: Persona,
   scenario: Scenario,
-): Promise<{ value?: PersonaLogin; skipReason?: LiveMessage }> {
+  startUrl: string,
+): Promise<{ value?: PersonaLogin; skipReason?: LiveMessage; notice?: LiveMessage }> {
   if (scenario.login === "anonymous") {
     return {};
   }
 
+  const hostMismatch = (loginHosts: string[]): LiveMessage => ({
+    key: scenario.login === "auto" ? "loginSkippedOtherHost" : "loginRequiredWrongHost",
+    params: { loginHost: loginHosts.join(", "), targetHost: new URL(startUrl).hostname },
+  });
+
   if (scenario.login === "auto") {
-    return { value: await getPersonaLogin(persona.id) };
+    const result = await getPersonaLogin(persona.id, startUrl);
+
+    // Credentials only exist for other sites; never log in there when testing this one.
+    if (result.kind === "otherHost") {
+      return { notice: hostMismatch(result.loginHosts) };
+    }
+
+    return result.kind === "login" ? { value: result.login } : {};
   }
 
   try {
-    const value = await getPersonaLogin(persona.id);
+    const result = await getPersonaLogin(persona.id, startUrl);
 
-    return value ? { value } : { skipReason: { key: "loginRequiredNoFile" } };
+    if (result.kind === "none") {
+      return { skipReason: { key: "loginRequiredNoFile" } };
+    }
+
+    return result.kind === "login"
+      ? { value: result.login }
+      : { skipReason: hostMismatch(result.loginHosts) };
   } catch (error) {
     return {
       skipReason: {
