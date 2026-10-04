@@ -286,7 +286,35 @@ async function readManifest(runId: string) {
 
 async function writeManifest(runId: string, manifest: RunManifest) {
   const manifestPath = path.join(runsDir, runId, "manifest.json");
-  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  await writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2));
+}
+
+const RENAME_ATTEMPTS = 5;
+const RENAME_RETRY_MS = 20;
+
+// The run page polls these JSON files while the executor rewrites them. A plain writeFile
+// truncates first, so a concurrent read could parse half a file and the API answered 404.
+// Writing a temp file and renaming it swaps the content in one step.
+async function writeFileAtomic(filePath: string, content: string) {
+  const tempPath = `${filePath}.${process.pid}-${Math.random().toString(36).slice(2, 8)}.tmp`;
+  await fs.writeFile(tempPath, content, "utf8");
+
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await fs.rename(tempPath, filePath);
+      return;
+    } catch (error) {
+      // Windows refuses the rename while a reader holds the target open; that is brief.
+      const code = (error as NodeJS.ErrnoException).code;
+
+      if ((code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") || attempt === RENAME_ATTEMPTS) {
+        await fs.rm(tempPath, { force: true });
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_MS * attempt));
+    }
+  }
 }
 
 async function readCellRecord(runId: string, cellId: string) {
@@ -296,7 +324,7 @@ async function readCellRecord(runId: string, cellId: string) {
 
 async function writeCellRecord(runId: string, cellId: string, record: CellRunRecord) {
   const recordPath = path.join(runsDir, runId, "cells", `${cellId}.json`);
-  await fs.writeFile(
+  await writeFileAtomic(
     recordPath,
     JSON.stringify(
       {
@@ -306,7 +334,6 @@ async function writeCellRecord(runId: string, cellId: string, record: CellRunRec
       null,
       2,
     ),
-    "utf8",
   );
 }
 

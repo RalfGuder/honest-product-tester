@@ -96,12 +96,14 @@ npm test        # unit tests
 If the site under test needs a login, every persona logs in with its **own** account before it starts browsing. The model never sees the password.
 
 1. Copy `credentials.example.json` to `credentials.local.json` (gitignored) or point `HPT_CREDENTIALS_FILE` at a file outside the repo.
-2. Set `loginUrl` and one `username`/`password` per persona id. Usernames must be unique.
-3. `basicAuth` is optional: set it when an HTTP Basic Auth gate (e.g. Caddy on staging) sits in front of the site. It is shared by all personas. The tester answers the gate from Node and passes only the gate cookies to the browser, so the app's own Bearer tokens are not overwritten.
+2. Add one entry per site to `sites`: its `loginUrl` and one `username`/`password` per persona id. Usernames must be unique within a site; the same persona may have a different account on every site. The older flat format (`loginUrl` and `personas` at the top level) still works and counts as a single site.
+3. `basicAuth` is optional: set it when an HTTP Basic Auth gate (e.g. Caddy on staging) sits in front of the site. It is shared by all personas of that site. The tester answers the gate from Node and passes only the gate cookies to the browser, so the app's own Bearer tokens are not overwritten.
 4. The selector fields are optional; leave them out to let `agent-browser auth login` detect the form.
 5. After submitting, the login is verified for about 8 seconds: the persona fails if the page stays on the login path, if a Blazor error banner (`#blazor-error-ui`) appears, or if the optional `loggedInSelector` is missing.
 
-Without a credentials file, runs behave as before. A persona missing from the file fails with `No login configured for persona <id>`. Scenarios control whether a login happens at all (see `login` above).
+Each run picks the site whose `loginUrl` host matches the URL under test: the same host, a subdomain or a parent domain, with the exact host winning. When no site matches, nobody logs in: `auto` explores anonymously and says so in the live terminal, `required` skips the persona.
+
+Without a credentials file, runs behave as before. A persona missing from the matching site fails with `No login configured for persona <id> on <host>`. Scenarios control whether a login happens at all (see `login` above).
 
 ## 📁 Run Data
 Runs are stored in `data/runs/<run-id>/` (gitignored):
