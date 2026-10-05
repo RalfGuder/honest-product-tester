@@ -34,6 +34,11 @@ export const de: Dictionary = {
     testingStyle: "Teststil",
   },
   runForm: {
+    targetKind: "Ziel",
+    targetWeb: "Website",
+    targetDesktop: "Desktop-App",
+    appLabel: "Desktop-App",
+    desktopAppsError: "Desktop-Apps konnten nicht geladen werden: {error}",
     urlLabel: "Website-URL",
     urlPlaceholder: "https://deine-seite.de",
     submit: "TESTEN",
@@ -208,6 +213,7 @@ export const de: Dictionary = {
     runFailed: "Provil-Lauf fehlgeschlagen.",
     loginRequiredNoFile: "Das Szenario erfordert einen Login, aber es gibt keine Zugangsdaten-Datei.",
     loginRequiredError: "Das Szenario erfordert einen Login: {error}",
+    loginRequiredNoApp: "Das Szenario erfordert einen Login, aber für {app} sind keine Zugangsdaten hinterlegt.",
     loginSkippedOtherHost:
       "Zugangsdaten gelten für {loginHost}, Ziel ist {targetHost} – Erkundung ohne Login.",
     loginRequiredWrongHost:

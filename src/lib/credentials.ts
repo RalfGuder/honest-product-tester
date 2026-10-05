@@ -25,7 +25,7 @@ export type DesktopLogin = {
   usernameField: string;
   passwordField: string;
   submit: string;
-  // Title (or part of it) of the window that only opens after a successful login.
+  // Regex for the title of the window that only opens after a successful login.
   loggedInWindow?: string;
 };
 
@@ -34,7 +34,15 @@ type CredentialsApp = {
   passwordField?: string;
   submit?: string;
   loggedInWindow?: string;
-  personas?: Record<string, { username?: string; password?: string }>;
+  // Per persona: an account for the login dialog and/or own command line arguments.
+  personas?: Record<string, { username?: string; password?: string; args?: unknown }>;
+};
+
+/** What a persona brings to a desktop app: own start arguments and/or a login. */
+export type DesktopPersonaSettings = {
+  // Replace the app's default arguments when set.
+  args?: string[];
+  login?: DesktopLogin;
 };
 
 type CredentialsSite = {
@@ -55,8 +63,6 @@ export type CredentialsFile = CredentialsSite & {
   sites?: CredentialsSite[];
   desktop?: Record<string, CredentialsApp>;
 };
-
-export type DesktopLoginResult = { kind: "none" } | { kind: "login"; login: DesktopLogin };
 
 export type PersonaLoginResult =
   | { kind: "none" }
@@ -227,19 +233,46 @@ export function selectPersonaLogin(
   };
 }
 
-/** Returns the persona's login for a desktop app; none when the app has no login block. */
-export function selectDesktopLogin(
+/**
+ * Returns the persona's settings for a desktop app. Personas without an entry get none:
+ * they start the app with its default arguments and without a login.
+ */
+export function selectDesktopPersona(
   file: CredentialsFile,
   personaId: string,
   appId: string,
-): DesktopLoginResult {
+): DesktopPersonaSettings {
   const app = file.desktop?.[appId];
 
   if (!app) {
-    return { kind: "none" };
+    return {};
   }
 
-  assertUniqueUsernames(app.personas, appId);
+  // Desktop testers may share one account: they run one after another by default.
+  const entry = app.personas?.[personaId];
+
+  if (!entry) {
+    return {};
+  }
+
+  const label = `Persona ${personaId} in ${appId}`;
+
+  if (
+    entry.args !== undefined &&
+    (!Array.isArray(entry.args) || !entry.args.every((arg) => typeof arg === "string"))
+  ) {
+    throw new Error(`${label}: "args" must be a list of strings.`);
+  }
+
+  const args = entry.args as string[] | undefined;
+
+  if (!entry.username && !entry.password) {
+    return { args };
+  }
+
+  if (!entry.username || !entry.password) {
+    throw new Error(`${label}: a login needs both username and password.`);
+  }
 
   if (!app.usernameField || !app.passwordField || !app.submit) {
     throw new Error(
@@ -247,14 +280,8 @@ export function selectDesktopLogin(
     );
   }
 
-  const entry = app.personas?.[personaId];
-
-  if (!entry?.username || !entry.password) {
-    throw new Error(`No login configured for persona ${personaId} in ${appId}.`);
-  }
-
   return {
-    kind: "login",
+    args,
     login: {
       appId,
       username: entry.username,
@@ -268,12 +295,12 @@ export function selectDesktopLogin(
 }
 
 /** Like getPersonaLogin, for a desktop app from the allowlist. */
-export async function getDesktopLogin(
+export async function getDesktopPersona(
   personaId: string,
   appId: string,
-): Promise<DesktopLoginResult> {
+): Promise<DesktopPersonaSettings> {
   const file = await readCredentialsFile();
-  return file ? selectDesktopLogin(file, personaId, appId) : { kind: "none" };
+  return file ? selectDesktopPersona(file, personaId, appId) : {};
 }
 
 /**

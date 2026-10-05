@@ -48,6 +48,7 @@ type ScenarioFrontmatter = {
   start_path?: unknown;
   target_app?: unknown;
   start_args?: unknown;
+  persona_start_args?: unknown;
   login?: unknown;
   allow_submit?: unknown;
   max_steps?: unknown;
@@ -68,6 +69,7 @@ export function parseScenario(raw: string, fallbackId: string): Scenario {
     startPath: asText(frontmatter.start_path) || undefined,
     targetApp: asText(frontmatter.target_app) || undefined,
     startArgs: asTextList(frontmatter.start_args),
+    personaStartArgs: asArgsByPersona(frontmatter.persona_start_args),
     login: asLoginMode(frontmatter.login),
     allowSubmit: frontmatter.allow_submit === true,
     maxSteps: asMaxSteps(frontmatter.max_steps),
@@ -97,6 +99,12 @@ export function serializeScenario(scenario: Scenario) {
 
   if (scenario.startArgs?.length) {
     frontmatter.start_args = [...scenario.startArgs];
+  }
+
+  if (scenario.personaStartArgs && Object.keys(scenario.personaStartArgs).length > 0) {
+    frontmatter.persona_start_args = Object.fromEntries(
+      Object.entries(scenario.personaStartArgs).map(([personaId, args]) => [personaId, [...args]]),
+    );
   }
 
   frontmatter.login = scenario.login;
@@ -190,6 +198,36 @@ export function scenarioFromForm(formData: FormData): Scenario {
   };
 }
 
+/**
+ * The form only shows some fields. When an existing scenario is saved, keep the fields the
+ * form did not send, so desktop settings written in the file survive an edit in the UI.
+ */
+export function keepFieldsNotInForm(
+  scenario: Scenario,
+  existing: Scenario | undefined,
+  formData: FormData,
+): Scenario {
+  if (!existing) {
+    return scenario;
+  }
+
+  const merged: Scenario = {
+    ...scenario,
+    targetApp: formData.has("targetApp") ? scenario.targetApp : existing.targetApp,
+    startArgs: formData.has("startArgs") ? scenario.startArgs : existing.startArgs,
+    personaStartArgs: existing.personaStartArgs,
+  };
+
+  if (merged.targetHost && merged.targetApp) {
+    throw new ScenarioValidationError(
+      "hostAndApp",
+      "A scenario targets either a website host or a desktop app, not both.",
+    );
+  }
+
+  return merged;
+}
+
 function formText(formData: FormData, key: string) {
   const value = formData.get(key);
 
@@ -275,6 +313,21 @@ function asTextList(value: unknown) {
   const items = Array.isArray(value) ? value.map(asText).filter(Boolean) : [];
 
   return items.length > 0 ? items : undefined;
+}
+
+function asArgsByPersona(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>).flatMap(([personaId, args]) => {
+    const list = asTextList(args);
+    const id = personaId.trim();
+
+    return id && list ? [[id, list] as const] : [];
+  });
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function asAssertions(value: unknown): ScenarioAssertion[] {

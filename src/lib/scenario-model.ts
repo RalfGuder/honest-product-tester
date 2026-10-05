@@ -32,8 +32,10 @@ export type Scenario = {
   targetHost?: string;
   startPath?: string;
   targetApp?: string;
-  // Extra command line arguments for the desktop app, appended to the app's default args.
+  // Extra command line arguments for the desktop app, appended to the app's (or persona's) args.
   startArgs?: string[];
+  // Per persona id: replaces startArgs for that persona.
+  personaStartArgs?: Record<string, string[]>;
   login: ScenarioLoginMode;
   allowSubmit: boolean;
   maxSteps: number;
@@ -111,6 +113,27 @@ export function matchesTarget(
   }
 
   return !scenario.targetApp && matchesTargetHost(scenario, target.url);
+}
+
+/**
+ * Command line of a desktop app for one persona in one scenario. Persona specific arguments
+ * replace the general ones on both levels: app defaults and scenario arguments.
+ */
+export function resolveStartArgs({
+  appArgs,
+  personaArgs,
+  scenario,
+  personaId,
+}: {
+  appArgs: string[];
+  personaArgs?: string[];
+  scenario: Pick<Scenario, "startArgs" | "personaStartArgs">;
+  personaId: string;
+}) {
+  return [
+    ...(personaArgs ?? appArgs),
+    ...(scenario.personaStartArgs?.[personaId] ?? scenario.startArgs ?? []),
+  ];
 }
 
 export function isPersonaAssigned(scenario: Pick<Scenario, "personas">, personaId: string) {

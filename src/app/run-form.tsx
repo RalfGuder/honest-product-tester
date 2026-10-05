@@ -10,7 +10,9 @@ import {
   EXPLORE_SCENARIO,
   isPersonaAssigned,
   matchesTarget,
+  TARGET_KINDS,
   type Scenario,
+  type TargetKind,
 } from "@/lib/scenario-model";
 import styles from "./page.module.css";
 
@@ -19,11 +21,23 @@ type RunFormProps = {
   defaultReportLanguage: Locale;
   personas: { id: string; name: string }[];
   scenarios: Pick<Scenario, "id" | "title" | "targetHost" | "targetApp" | "allowSubmit" | "personas">[];
+  // Allowlisted desktop apps; empty when desktop runs are not possible here.
+  desktopApps: { id: string; name: string }[];
+  desktopAppsError?: string;
 };
 
-export function RunForm({ action, defaultReportLanguage, personas, scenarios }: RunFormProps) {
+export function RunForm({
+  action,
+  defaultReportLanguage,
+  personas,
+  scenarios,
+  desktopApps,
+  desktopAppsError,
+}: RunFormProps) {
   const { t, format, plural } = useI18n();
+  const [targetKind, setTargetKind] = useState<TargetKind>("web");
   const [url, setUrl] = useState("");
+  const [appId, setAppId] = useState(desktopApps[0]?.id ?? "");
   const [selectedScenarios, setSelectedScenarios] = useState<Set<string>>(
     () => new Set([EXPLORE_SCENARIO.id]),
   );
@@ -32,7 +46,8 @@ export function RunForm({ action, defaultReportLanguage, personas, scenarios }: 
   );
 
   const allScenarios = [EXPLORE_SCENARIO, ...scenarios];
-  const target = { kind: "web" as const, url };
+  const target =
+    targetKind === "desktop" ? { kind: "desktop" as const, appId } : { kind: "web" as const, url };
   const matching = allScenarios.filter((scenario) => matchesTarget(scenario, target));
   const others = allScenarios.filter((scenario) => !matchesTarget(scenario, target));
   const personaNames = new Map(personas.map((persona) => [persona.id, persona.name]));
@@ -88,20 +103,58 @@ export function RunForm({ action, defaultReportLanguage, personas, scenarios }: 
 
   return (
     <form className={styles.form} action={action}>
-      <label className={styles.label} htmlFor="url">
-        {t.runForm.urlLabel}
+      {desktopApps.length > 0 ? (
+        <div className={styles.choiceList} role="radiogroup" aria-label={t.runForm.targetKind}>
+          {TARGET_KINDS.map((kind) => (
+            <label key={kind} className={styles.choice}>
+              <input
+                type="radio"
+                name="targetKind"
+                value={kind}
+                checked={targetKind === kind}
+                onChange={() => setTargetKind(kind)}
+              />
+              <span>{kind === "web" ? t.runForm.targetWeb : t.runForm.targetDesktop}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+      {desktopAppsError ? (
+        <p className={styles.formWarning}>
+          {format(t.runForm.desktopAppsError, { error: desktopAppsError })}
+        </p>
+      ) : null}
+      <label className={styles.label} htmlFor={targetKind === "desktop" ? "appId" : "url"}>
+        {targetKind === "desktop" ? t.runForm.appLabel : t.runForm.urlLabel}
       </label>
       <div className={styles.inputRow}>
-        <input
-          id="url"
-          name="url"
-          type="url"
-          className={styles.input}
-          placeholder={t.runForm.urlPlaceholder}
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          required
-        />
+        {targetKind === "desktop" ? (
+          <select
+            id="appId"
+            name="appId"
+            className={styles.input}
+            value={appId}
+            onChange={(event) => setAppId(event.target.value)}
+            required
+          >
+            {desktopApps.map((app) => (
+              <option key={app.id} value={app.id}>
+                {app.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            id="url"
+            name="url"
+            type="url"
+            className={styles.input}
+            placeholder={t.runForm.urlPlaceholder}
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            required
+          />
+        )}
         <button className={styles.submitButton} type="submit" disabled={cellCount === 0}>
           {t.runForm.submit}
         </button>

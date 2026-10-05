@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   loginAppliesTo,
-  selectDesktopLogin,
+  selectDesktopPersona,
   selectPersonaLogin,
   type CredentialsFile,
 } from "@/lib/credentials";
@@ -151,22 +151,23 @@ describe("selectPersonaLogin", () => {
   });
 });
 
-describe("selectDesktopLogin", () => {
+describe("selectDesktopPersona", () => {
   const app = {
     usernameField: "UsernameBox",
     passwordField: "PasswordBox",
     submit: "LoginButton",
     loggedInWindow: "Start",
     personas: {
-      alice: { username: "alice", password: "pw-a" },
+      alice: { username: "alice", password: "pw-a", args: ["--test", "Case 3"] },
       bob: { username: "bob", password: "pw-b" },
+      carl: { args: ["--profile", "carl"] },
     },
   };
   const file: CredentialsFile = { desktop: { "desktop-demo": app } };
 
-  it("returns the persona's login for the app", () => {
-    expect(selectDesktopLogin(file, "alice", "desktop-demo")).toEqual({
-      kind: "login",
+  it("returns the persona's login and start arguments for the app", () => {
+    expect(selectDesktopPersona(file, "alice", "desktop-demo")).toEqual({
+      args: ["--test", "Case 3"],
       login: {
         appId: "desktop-demo",
         username: "alice",
@@ -179,27 +180,52 @@ describe("selectDesktopLogin", () => {
     });
   });
 
-  it("returns none for an app without a login block", () => {
-    expect(selectDesktopLogin(file, "alice", "other-app")).toEqual({ kind: "none" });
+  it("returns nothing for an app without a block", () => {
+    expect(selectDesktopPersona(file, "alice", "other-app")).toEqual({});
   });
 
-  it("fails when the persona has no login for the app", () => {
-    expect(() => selectDesktopLogin(file, "carol", "desktop-demo")).toThrow(
-      "No login configured for persona carol in desktop-demo.",
+  it("returns nothing for a persona without an entry", () => {
+    expect(selectDesktopPersona(file, "dora", "desktop-demo")).toEqual({});
+  });
+
+  it("allows start arguments without a login", () => {
+    expect(selectDesktopPersona(file, "carl", "desktop-demo")).toEqual({
+      args: ["--profile", "carl"],
+    });
+  });
+
+  it("fails on start arguments that are not a list of strings", () => {
+    const broken: CredentialsFile = {
+      desktop: { "desktop-demo": { ...app, personas: { alice: { args: "--test 3" } } } },
+    };
+
+    expect(() => selectDesktopPersona(broken, "alice", "desktop-demo")).toThrow(/"args"/);
+  });
+
+  it("fails on a login with only a username", () => {
+    const broken: CredentialsFile = {
+      desktop: { "desktop-demo": { ...app, personas: { alice: { username: "alice" } } } },
+    };
+
+    expect(() => selectDesktopPersona(broken, "alice", "desktop-demo")).toThrow(
+      /both username and password/,
     );
   });
 
-  it("fails when two personas share an account", () => {
+  it("lets personas share one account", () => {
     const shared: CredentialsFile = {
       desktop: {
         "desktop-demo": {
           ...app,
-          personas: { alice: app.personas.alice, bob: { username: "ALICE", password: "x" } },
+          personas: { alice: app.personas.alice, bob: app.personas.alice },
         },
       },
     };
 
-    expect(() => selectDesktopLogin(shared, "alice", "desktop-demo")).toThrow(/same login/);
+    expect(selectDesktopPersona(shared, "bob", "desktop-demo").login).toMatchObject({
+      username: "alice",
+      password: "pw-a",
+    });
   });
 
   it("fails when the login dialog selectors are missing", () => {
@@ -207,7 +233,10 @@ describe("selectDesktopLogin", () => {
       desktop: { "desktop-demo": { ...app, submit: undefined } },
     };
 
-    expect(() => selectDesktopLogin(incomplete, "alice", "desktop-demo")).toThrow(/submit/);
+    expect(() => selectDesktopPersona(incomplete, "alice", "desktop-demo")).toThrow(/submit/);
+    expect(selectDesktopPersona(incomplete, "carl", "desktop-demo")).toEqual({
+      args: ["--profile", "carl"],
+    });
   });
 
   it("treats a file with only desktop logins as having no website login", () => {

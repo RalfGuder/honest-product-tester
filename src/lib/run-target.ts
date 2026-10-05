@@ -13,7 +13,9 @@ export type DesktopTarget = {
 export type RunTarget = WebTarget | DesktopTarget;
 
 /** What the run form asks for; createRun resolves a desktop app id against the allowlist. */
-export type RunTargetInput = { kind: "web"; url: string } | { kind: "desktop"; appId: string };
+export type RunTargetInput =
+  | { kind: "web"; url: string }
+  | { kind: "desktop"; appId: string; maxParallel?: number };
 
 /** Short, human-readable name of a run target: the URL or the app name. */
 export function describeTarget(target: RunTarget) {
