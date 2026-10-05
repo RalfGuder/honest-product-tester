@@ -5,8 +5,12 @@ import { redirect } from "next/navigation";
 
 import { getI18n } from "@/i18n/server";
 import { getPersonas } from "@/lib/personas";
-import { scenarioFromForm, ScenarioValidationError } from "@/lib/scenario-format";
-import { deleteScenario, saveScenario } from "@/lib/scenarios";
+import {
+  keepFieldsNotInForm,
+  scenarioFromForm,
+  ScenarioValidationError,
+} from "@/lib/scenario-format";
+import { deleteScenario, getScenario, saveScenario } from "@/lib/scenarios";
 
 export type ScenarioFormState = {
   error?: string;
@@ -24,7 +28,12 @@ export async function saveScenarioAction(
   const isNew = !formData.get("id");
 
   try {
-    const scenario = scenarioFromForm(formData);
+    const fromForm = scenarioFromForm(formData);
+    const scenario = keepFieldsNotInForm(
+      fromForm,
+      isNew ? undefined : await getScenario(fromForm.id),
+      formData,
+    );
     const knownIds = new Set((await getPersonas()).map((persona) => persona.id));
 
     await saveScenario(

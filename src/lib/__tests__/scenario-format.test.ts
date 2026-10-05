@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   assertionAppliesTo,
   buildCellPlan,
+  keepFieldsNotInForm,
+  resolveStartArgs,
   DEFAULT_MAX_STEPS,
   EXPLORE_SCENARIO,
   isPersonaAssigned,
@@ -271,6 +273,7 @@ describe("desktop scenarios", () => {
     successCriteria: "The export dialog confirms the file was written",
     targetApp: "desktop-demo",
     startArgs: ["--profile", "Monthly Report", "--profile"],
+    personaStartArgs: { "tom-thanks": ["--profile", "Tom"], "cardi-confused": [] as never },
     login: "auto",
     allowSubmit: true,
     maxSteps: 15,
@@ -295,12 +298,23 @@ describe("desktop scenarios", () => {
 
   const base = { title: "Export", mission: "Export it.", successCriteria: "Exported" };
 
-  it("round-trips target_app, start_args and window_title_matches", () => {
+  it("round-trips target_app, start_args, persona_start_args and window_title_matches", () => {
     const raw = serializeScenario(desktopSample);
 
     expect(raw).toContain("target_app: desktop-demo");
     expect(raw).toContain("start_args:");
-    expect(parseScenario(raw, "fallback")).toEqual(desktopSample);
+    expect(raw).toContain("persona_start_args:");
+    // Empty argument lists are dropped when read back.
+    expect(parseScenario(raw, "fallback")).toEqual({
+      ...desktopSample,
+      personaStartArgs: { "tom-thanks": ["--profile", "Tom"] },
+    });
+  });
+
+  it("ignores persona_start_args that are not a map of lists", () => {
+    const raw = "---\ntitle: X\npersona_start_args: [a, b]\n---\nDo it.\n";
+
+    expect(parseScenario(raw, "x").personaStartArgs).toBeUndefined();
   });
 
   it("reads the app id and one start argument per line from the form", () => {
@@ -372,5 +386,67 @@ describe("assertionAppliesTo", () => {
   it("checks visible text on both target kinds", () => {
     expect(assertionAppliesTo("text_visible", "web")).toBe(true);
     expect(assertionAppliesTo("text_visible", "desktop")).toBe(true);
+  });
+});
+
+describe("resolveStartArgs", () => {
+  const scenario = { startArgs: ["--lang", "de"], personaStartArgs: { tom: ["--lang", "en"] } };
+
+  it("uses the app defaults and the scenario args", () => {
+    expect(resolveStartArgs({ appArgs: ["--test", "2"], scenario, personaId: "ann" })).toEqual([
+      "--test",
+      "2",
+      "--lang",
+      "de",
+    ]);
+  });
+
+  it("lets persona args replace the defaults on both levels", () => {
+    expect(
+      resolveStartArgs({ appArgs: ["--test", "2"], personaArgs: ["--test", "7"], scenario, personaId: "tom" }),
+    ).toEqual(["--test", "7", "--lang", "en"]);
+  });
+
+  it("works without any scenario args", () => {
+    expect(resolveStartArgs({ appArgs: [], scenario: {}, personaId: "tom" })).toEqual([]);
+  });
+});
+
+describe("keepFieldsNotInForm", () => {
+  const existing: Scenario = {
+    ...sample,
+    targetHost: undefined,
+    startPath: undefined,
+    targetApp: "desktop-demo",
+    startArgs: ["--lang", "de"],
+    personaStartArgs: { tom: ["--lang", "en"] },
+  };
+  const fromForm: Scenario = { ...existing, targetApp: undefined, startArgs: undefined, personaStartArgs: undefined };
+
+  it("keeps desktop fields the form did not send", () => {
+    expect(keepFieldsNotInForm(fromForm, existing, new FormData())).toEqual(existing);
+  });
+
+  it("takes fields the form did send, even when emptied", () => {
+    const data = new FormData();
+
+    data.append("targetApp", "");
+    data.append("startArgs", "");
+
+    expect(keepFieldsNotInForm(fromForm, existing, data)).toMatchObject({
+      targetApp: undefined,
+      startArgs: undefined,
+      personaStartArgs: { tom: ["--lang", "en"] },
+    });
+  });
+
+  it("leaves new scenarios alone", () => {
+    expect(keepFieldsNotInForm(fromForm, undefined, new FormData())).toBe(fromForm);
+  });
+
+  it("rejects a host from the form next to a kept app", () => {
+    expect(() =>
+      keepFieldsNotInForm({ ...fromForm, targetHost: "example.com" }, existing, new FormData()),
+    ).toThrow(expect.objectContaining({ code: "hostAndApp" }));
   });
 });

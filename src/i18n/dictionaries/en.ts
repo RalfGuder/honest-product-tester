@@ -35,6 +35,11 @@ export const en = {
     testingStyle: "Testing Style",
   },
   runForm: {
+    targetKind: "Target",
+    targetWeb: "Website",
+    targetDesktop: "Desktop app",
+    appLabel: "Desktop app",
+    desktopAppsError: "Could not load the desktop apps: {error}",
     urlLabel: "Website URL",
     urlPlaceholder: "https://your-site.com",
     submit: "TEST",
@@ -209,6 +214,7 @@ export const en = {
     runFailed: "Persona run failed.",
     loginRequiredNoFile: "Scenario requires a login, but no credentials file exists.",
     loginRequiredError: "Scenario requires a login: {error}",
+    loginRequiredNoApp: "Scenario requires a login, but there are no credentials for {app}.",
     loginSkippedOtherHost:
       "Credentials are for {loginHost}, target is {targetHost} – exploring without login.",
     loginRequiredWrongHost:

@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -16,6 +15,7 @@ import { buildFocusScript, toCropRegion, type FocusResult } from "@/lib/browser-
 import type { Scenario, ScenarioAssertion } from "@/lib/scenario-format";
 import type { AssertionResult } from "@/lib/scenario-verdict";
 
+import { runCli } from "@/lib/drivers/spawn-cli";
 import type { TargetDriver, ToolRunner } from "@/lib/drivers/types";
 import { buildMissionPrompt, buildPersonaPrompt } from "@/lib/drivers/web-prompts";
 
@@ -49,21 +49,32 @@ export function createWebDriver({
   startUrl: string;
 }): TargetDriver {
   const browserSession = getBrowserSessionName(runId, cellId);
+  let personaLogin: PersonaLogin | undefined;
 
   return {
     kind: "web",
-    resolveLogin: (persona, scenario) => resolveCellLogin(persona, scenario, startUrl),
+    resolvePersona: async (persona, scenario) => {
+      const { value, ...rest } = await resolveCellLogin(persona, scenario, startUrl);
+
+      personaLogin = value;
+
+      return { ...rest, username: value?.username };
+    },
     // agent-browser starts its daemon with the first command, nothing to launch up front.
     start: async () => {},
-    login: (login) => loginPersona(browserSession, login),
+    login: async () => {
+      if (personaLogin) {
+        await loginPersona(browserSession, personaLogin);
+      }
+    },
     exec: (args) => runAgentBrowser(["--session", browserSession, ...args]),
     createTools: (runTool) => createBrowserTools({ cellId, runId, runTool, screenshotDir }),
     buildExplorePrompt: (persona, loggedIn, reportLanguage) =>
       buildPersonaPrompt(persona, startUrl, loggedIn, reportLanguage),
     buildMissionPrompt: (persona, scenario, loggedIn, reportLanguage) =>
       buildMissionPrompt(persona, scenario, startUrl, loggedIn, reportLanguage),
-    readFinalLocation: () => readCurrentUrl(browserSession),
-    checkAssertions: (assertions, finalUrl) =>
+    readFinalEvidence: async () => ({ finalUrl: await readCurrentUrl(browserSession) }),
+    checkAssertions: (assertions, { finalUrl }) =>
       checkAssertions(browserSession, assertions, finalUrl),
     captureFinal: () => captureFinalScreenshot(runId, cellId, browserSession, screenshotDir),
     close: () => closeBrowserSession(browserSession),
@@ -482,62 +493,11 @@ function getBrowserSessionName(runId: string, cellId: string) {
 
 const AGENT_BROWSER_TIMEOUT_MS = 90_000;
 
-// Resolves on "exit", not "close": the first command of a session spawns a daemon
-// that inherits stdout/stderr, so the pipes never close and "close" never fires.
 function runAgentBrowser(
   args: string[],
   { stdin, timeoutMs = AGENT_BROWSER_TIMEOUT_MS }: { stdin?: string; timeoutMs?: number } = {},
 ) {
-  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(AGENT_BROWSER_BIN, args, { windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const finish = (error?: Error) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      clearTimeout(timer);
-      child.stdout.destroy();
-      child.stderr.destroy();
-
-      if (error) {
-        reject(error);
-      } else {
-        resolve({ stdout, stderr });
-      }
-    };
-
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error(`agent-browser ${args.join(" ")} timed out after ${timeoutMs} ms`));
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => finish(error));
-    child.on("exit", (code) => {
-      // Give buffered output a moment to arrive before the streams are destroyed.
-      setTimeout(() => {
-        finish(
-          code === 0
-            ? undefined
-            : new Error(
-                `agent-browser ${args.join(" ")} failed (${code}): ${(stderr || stdout).trim()}`,
-              ),
-        );
-      }, 50);
-    });
-
-    child.stdin.end(stdin ?? "");
-  });
+  return runCli(AGENT_BROWSER_BIN, "agent-browser", args, { stdin, timeoutMs });
 }
 
 // The auth vault is a shared file; serialize writes so parallel personas do not race on it.

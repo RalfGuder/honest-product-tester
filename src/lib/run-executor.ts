@@ -23,7 +23,7 @@ import {
   getRunScenarios,
   getScreenshotDir,
   updateCellRecord,
-  type WebTarget,
+  type RunTarget,
   updateRunManifest,
   writeCellRawOutput,
   writeCellReport,
@@ -47,13 +47,16 @@ import {
   parseCellReport,
   reconcileVerdict,
   type AssertionResult,
+  type CellEvidence,
   type CellReport,
   type ParsedCellReport,
   type StepBudget,
 } from "@/lib/scenario-verdict";
 import { createToolRunner } from "@/lib/drivers/tool-runner";
-import type { TargetDriver } from "@/lib/drivers/types";
+import type { CellLogin, TargetDriver } from "@/lib/drivers/types";
+import { createDesktopDriver, preflightAgentWpf } from "@/lib/drivers/desktop-driver";
 import { createWebDriver } from "@/lib/drivers/web-driver";
+import { settleWithLimit } from "@/lib/concurrency";
 
 const PERSONA_MODEL_PROVIDER = "anthropic";
 const PERSONA_MODEL_ID = "claude-sonnet-4-5";
@@ -98,17 +101,25 @@ async function executeRun(runId: string) {
     .map((personaId) => personas.find((item) => item.id === personaId))
     .filter((persona): persona is Persona => Boolean(persona));
 
-  if (manifest.target.kind !== "web") {
-    await updateRunManifest(runId, (current) => ({
-      ...current,
-      status: "failed",
-      completedAt: new Date().toISOString(),
-      error: "Desktop targets are not supported yet.",
-    }));
-    return;
+  const target = manifest.target;
+
+  if (target.kind === "desktop") {
+    try {
+      await preflightAgentWpf();
+    } catch (error) {
+      await updateRunManifest(runId, (current) => ({
+        ...current,
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "agent-wpf is not available.",
+      }));
+      return;
+    }
   }
 
-  const target = manifest.target;
+  const maxParallel = manifest.maxParallel ?? Number.POSITIVE_INFINITY;
+  // Real mouse/keyboard input moves the one shared cursor, so only a lone tester may use it.
+  const realInput = maxParallel === 1;
 
   await updateRunManifest(runId, (current) => ({
     ...current,
@@ -116,11 +127,9 @@ async function executeRun(runId: string) {
     startedAt: current.startedAt ?? new Date().toISOString(),
   }));
 
-  // Personas run in parallel; each persona works through its scenarios one after another.
-  const results = await Promise.allSettled(
-    runPersonas.map((persona) =>
-      runPersonaScenarios(runId, target, persona, scenarios, manifest.reportLanguage),
-    ),
+  // Personas run in parallel (up to maxParallel); each works through its scenarios in turn.
+  const results = await settleWithLimit(runPersonas, maxParallel, (persona) =>
+    runPersonaScenarios(runId, target, persona, scenarios, manifest.reportLanguage, realInput),
   );
   const failures = results.filter(
     (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -146,16 +155,17 @@ async function executeRun(runId: string) {
 
 async function runPersonaScenarios(
   runId: string,
-  target: WebTarget,
+  target: RunTarget,
   persona: Persona,
   scenarios: Scenario[],
   reportLanguage: Locale | undefined,
+  realInput: boolean,
 ) {
   const errors: string[] = [];
 
   for (const scenario of scenarios.filter((item) => isPersonaAssigned(item, persona.id))) {
     try {
-      await runCell(runId, target, persona, scenario, reportLanguage);
+      await runCell(runId, target, persona, scenario, reportLanguage, realInput);
     } catch (error) {
       errors.push(
         `${persona.name} / ${scenario.title}: ${error instanceof Error ? error.message : "unknown failure"}`,
@@ -170,15 +180,16 @@ async function runPersonaScenarios(
 
 async function runCell(
   runId: string,
-  target: WebTarget,
+  target: RunTarget,
   persona: Persona,
   scenario: Scenario,
   reportLanguage: Locale | undefined,
+  realInput: boolean,
 ) {
   const cellId = getCellId(persona.id, scenario.id);
   const isExplore = scenario.id === EXPLORE_SCENARIO_ID;
   const screenshotDir = getScreenshotDir(runId);
-  const driver = createCellDriver(target, scenario, { cellId, runId, screenshotDir });
+  const driver = createCellDriver(target, scenario, { cellId, runId, screenshotDir }, realInput);
   const reportTitle = isExplore ? persona.name : `${persona.name} – ${scenario.title}`;
   // Report files are written in the run's report language; runs without one stay English.
   const reportDictionary = getDictionary(reportLanguage ?? "en");
@@ -191,7 +202,15 @@ async function runCell(
   }));
   await appendCellObservation(runId, cellId, { key: "runStarted" });
 
-  const login = await driver.resolveLogin(persona, scenario);
+  let login: CellLogin;
+
+  try {
+    login = await driver.resolvePersona(persona, scenario);
+  } catch (error) {
+    // E.g. a broken credentials file; fail the cell instead of leaving it "running".
+    await failCell(runId, cellId, { isExplore, scenario, reportTitle, reportDictionary }, 0, error);
+    throw error;
+  }
 
   if (login.skipReason) {
     await skipCell(runId, cellId, scenario, reportTitle, login.skipReason, reportDictionary);
@@ -279,25 +298,27 @@ async function runCell(
   };
 
   let graceTimer: NodeJS.Timeout | undefined;
-  const timeoutTimer = setTimeout(() => {
-    control.timedOut = true;
-    graceTimer = setTimeout(control.abort, REPORT_GRACE_MS);
-  }, getCellTimeoutMs(scenario.maxSteps));
+  let timeoutTimer: NodeJS.Timeout | undefined;
 
   try {
     await driver.start();
 
-    if (login.value) {
+    if (login.username) {
+      const { username } = login;
+
       await updateCellRecord(runId, cellId, (current) => ({
         ...current,
-        summary: { key: "loggingIn", params: { username: login.value?.username ?? "" } },
+        summary: { key: "loggingIn", params: { username } },
       }));
-      await driver.login(login.value);
-      await appendCellObservation(runId, cellId, {
-        key: "loggedIn",
-        params: { username: login.value.username },
-      });
+      await driver.login();
+      await appendCellObservation(runId, cellId, { key: "loggedIn", params: { username } });
     }
+
+    // Started after launch and login, so a slow app start does not eat the persona's time.
+    timeoutTimer = setTimeout(() => {
+      control.timedOut = true;
+      graceTimer = setTimeout(control.abort, REPORT_GRACE_MS);
+    }, getCellTimeoutMs(scenario.maxSteps));
 
     watchdog = createIdleWatchdog({
       idleMs: IDLE_TIMEOUT_MS,
@@ -310,8 +331,8 @@ async function runCell(
 
     await session.prompt(
       isExplore
-        ? driver.buildExplorePrompt(persona, Boolean(login.value), reportLanguage)
-        : driver.buildMissionPrompt(persona, scenario, Boolean(login.value), reportLanguage),
+        ? driver.buildExplorePrompt(persona, Boolean(login.username), reportLanguage)
+        : driver.buildMissionPrompt(persona, scenario, Boolean(login.username), reportLanguage),
     );
 
     if (providerError && !control.abortedByLimit) {
@@ -368,22 +389,12 @@ async function runCell(
 
     await appendCellObservation(runId, cellId, { key: "reportWritten" });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown persona failure";
-
-    await updateCellRecord(runId, cellId, (current) => ({
-      ...current,
-      status: "failed",
-      completedAt: new Date().toISOString(),
-      summary: { key: "runFailed" },
-      error: message,
-      cellReport: isExplore
-        ? undefined
-        : buildFixedReport("error", scenario, budget.used, message),
-    }));
-    await writeCellReport(
+    await failCell(
       runId,
       cellId,
-      buildFailedReportMarkdown(reportDictionary, reportTitle, message),
+      { isExplore, scenario, reportTitle, reportDictionary },
+      budget.used,
+      error,
     );
 
     throw error;
@@ -395,6 +406,35 @@ async function runCell(
     session.dispose();
     await driver.close().catch(() => undefined);
   }
+}
+
+async function failCell(
+  runId: string,
+  cellId: string,
+  {
+    isExplore,
+    scenario,
+    reportTitle,
+    reportDictionary,
+  }: { isExplore: boolean; scenario: Scenario; reportTitle: string; reportDictionary: Dictionary },
+  stepsUsed: number,
+  error: unknown,
+) {
+  const message = error instanceof Error ? error.message : "Unknown persona failure";
+
+  await updateCellRecord(runId, cellId, (current) => ({
+    ...current,
+    status: "failed",
+    completedAt: new Date().toISOString(),
+    summary: { key: "runFailed" },
+    error: message,
+    cellReport: isExplore ? undefined : buildFixedReport("error", scenario, stepsUsed, message),
+  }));
+  await writeCellReport(
+    runId,
+    cellId,
+    buildFailedReportMarkdown(reportDictionary, reportTitle, message),
+  );
 }
 
 async function skipCell(
@@ -476,8 +516,12 @@ async function evaluateMission({
     throw unreadableReportError(report.error, cellId);
   }
 
-  const finalUrl = await driver.readFinalLocation().catch(() => undefined);
-  const assertionResults = await checkApplicableAssertions(driver, scenario.assertions, finalUrl);
+  const finalEvidence: CellEvidence = await driver.readFinalEvidence().catch(() => ({}));
+  const assertionResults = await checkApplicableAssertions(
+    driver,
+    scenario.assertions,
+    finalEvidence,
+  );
   const { verdict, misjudged } = parsed
     ? reconcileVerdict(parsed.selfVerdict, assertionResults)
     : {
@@ -493,7 +537,8 @@ async function evaluateMission({
     verdict,
     selfVerdict: parsed?.selfVerdict,
     misjudged,
-    evidence: { ...parsed?.evidence, finalUrl: parsed?.evidence.finalUrl ?? finalUrl },
+    // The persona's own evidence wins; the driver fills in what it left out.
+    evidence: { ...finalEvidence, ...parsed?.evidence },
     stepsUsed: budget.used,
     maxSteps: scenario.maxSteps,
     frictionPoints: parsed?.frictionPoints ?? [],
@@ -509,12 +554,12 @@ async function evaluateMission({
 async function checkApplicableAssertions(
   driver: TargetDriver,
   assertions: ScenarioAssertion[],
-  finalLocation: string | undefined,
+  finalEvidence: CellEvidence,
 ): Promise<AssertionResult[]> {
   const applicable = assertions.filter((assertion) =>
     assertionAppliesTo(assertion.type, driver.kind),
   );
-  const checked = await driver.checkAssertions(applicable, finalLocation);
+  const checked = await driver.checkAssertions(applicable, finalEvidence);
 
   return assertions.map(
     (assertion) =>
@@ -523,11 +568,14 @@ async function checkApplicableAssertions(
 }
 
 function createCellDriver(
-  target: WebTarget,
+  target: RunTarget,
   scenario: Scenario,
   cell: { cellId: string; runId: string; screenshotDir: string },
+  realInput: boolean,
 ) {
-  return createWebDriver({ ...cell, startUrl: resolveStartUrl(target.url, scenario.startPath) });
+  return target.kind === "desktop"
+    ? createDesktopDriver({ ...cell, realInput, target })
+    : createWebDriver({ ...cell, startUrl: resolveStartUrl(target.url, scenario.startPath) });
 }
 
 function unreadableReportError(error: Error, cellId: string) {

@@ -4,17 +4,32 @@ import { startRunAction } from "@/app/actions";
 import { HomeClient } from "@/app/home-client";
 import { RunForm } from "@/app/run-form";
 import { getI18n } from "@/i18n/server";
+import { getDesktopApps } from "@/lib/desktop-apps";
 import { getPersonas, localizePersona } from "@/lib/personas";
 import { getScenarios } from "@/lib/scenarios";
 import styles from "./page.module.css";
 
+// Desktop apps run through agent-wpf, which only exists on Windows.
+async function loadDesktopApps(): Promise<{ apps: { id: string; name: string }[]; error?: string }> {
+  if (process.platform !== "win32") {
+    return { apps: [] };
+  }
+
+  try {
+    return { apps: (await getDesktopApps()).map(({ id, name }) => ({ id, name })) };
+  } catch (error) {
+    return { apps: [], error: error instanceof Error ? error.message : "unknown error" };
+  }
+}
+
 export default async function Home() {
   // Scenarios are edited at runtime, so render on every request.
   await connection();
-  const [personas, scenarios, { locale, t }] = await Promise.all([
+  const [personas, scenarios, { locale, t }, desktop] = await Promise.all([
     getPersonas(),
     getScenarios(),
     getI18n(),
+    loadDesktopApps(),
   ]);
 
   return (
@@ -44,6 +59,8 @@ export default async function Home() {
               allowSubmit,
               personas: assigned,
             }))}
+            desktopApps={desktop.apps}
+            desktopAppsError={desktop.error}
           />
         </section>
 

@@ -36,6 +36,8 @@ export type RunManifest = {
   personas: string[];
   // Snapshot of the scenarios at run start. Missing in runs created before scenarios existed.
   scenarios?: Scenario[];
+  // Testers working at the same time. Missing = no limit (web); desktop runs default to 1.
+  maxParallel?: number;
   // Language the personas answer in. Missing in runs created before reports were localized.
   reportLanguage?: Locale;
   currentPersonaId?: string;
@@ -119,6 +121,7 @@ export async function createRun(
   const manifest: RunManifest = {
     id: runId,
     target,
+    maxParallel: targetInput.kind === "desktop" ? (targetInput.maxParallel ?? 1) : undefined,
     createdAt: new Date().toISOString(),
     status: "queued",
     orchestration: "parallel",
