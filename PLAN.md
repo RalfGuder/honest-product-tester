@@ -214,3 +214,7 @@ The wording and tone inside those sections should still follow the persona.
 - merged cross-persona master summary
 - production-grade queueing
 - database-backed analytics
+
+## Follow-up Plans
+
+- [WPF desktop apps as test targets](docs/plans/wpf-desktop-targets.md): drive Windows desktop apps via `agent-wpf` alongside websites.
