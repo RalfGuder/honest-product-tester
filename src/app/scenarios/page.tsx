@@ -48,7 +48,7 @@ export default async function ScenariosPage() {
                           })
                         : t.scenarioList.allTesters}
                     </span>
-                    <span>{scenario.targetHost ?? t.scenarioList.anySite}</span>
+                    <span>{scenario.targetHost ?? scenario.targetApp ?? t.scenarioList.anySite}</span>
                     <span>{format(t.scenarioList.login, { mode: scenario.login })}</span>
                     <span>{format(t.scenarioList.maxSteps, { count: scenario.maxSteps })}</span>
                     {scenario.allowSubmit ? (

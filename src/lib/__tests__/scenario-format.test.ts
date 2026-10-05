@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertionAppliesTo,
   buildCellPlan,
   DEFAULT_MAX_STEPS,
   EXPLORE_SCENARIO,
   isPersonaAssigned,
+  matchesTarget,
   matchesTargetHost,
   parseScenario,
   resolveStartUrl,
+  ScenarioValidationError,
   scenarioFromForm,
   serializeScenario,
   slugify,
@@ -257,5 +260,117 @@ describe("buildCellPlan", () => {
 
   it("returns no cells when no selected persona is assigned", () => {
     expect(buildCellPlan(["tom-thanks"], [admin])).toEqual([]);
+  });
+});
+
+describe("desktop scenarios", () => {
+  const desktopSample: Scenario = {
+    id: "export-report",
+    title: "Export a report",
+    mission: "Export the monthly report as PDF.",
+    successCriteria: "The export dialog confirms the file was written",
+    targetApp: "desktop-demo",
+    startArgs: ["--profile", "Monthly Report", "--profile"],
+    login: "auto",
+    allowSubmit: true,
+    maxSteps: 15,
+    personas: [],
+    assertions: [
+      { type: "window_title_matches", value: "^Export( complete)?$" },
+      { type: "text_visible", value: "Saved" },
+    ],
+  };
+
+  const form = (entries: Record<string, string | string[]>) => {
+    const data = new FormData();
+
+    for (const [key, value] of Object.entries(entries)) {
+      for (const item of Array.isArray(value) ? value : [value]) {
+        data.append(key, item);
+      }
+    }
+
+    return data;
+  };
+
+  const base = { title: "Export", mission: "Export it.", successCriteria: "Exported" };
+
+  it("round-trips target_app, start_args and window_title_matches", () => {
+    const raw = serializeScenario(desktopSample);
+
+    expect(raw).toContain("target_app: desktop-demo");
+    expect(raw).toContain("start_args:");
+    expect(parseScenario(raw, "fallback")).toEqual(desktopSample);
+  });
+
+  it("reads the app id and one start argument per line from the form", () => {
+    const scenario = scenarioFromForm(
+      form({ ...base, targetApp: " Desktop-Demo ", startArgs: "--lang de\r\n\n--profile x\n" }),
+    );
+
+    expect(scenario.targetApp).toBe("desktop-demo");
+    expect(scenario.targetHost).toBeUndefined();
+    expect(scenario.startArgs).toEqual(["--lang de", "--profile x"]);
+  });
+
+  it("leaves start args out when the field is empty", () => {
+    expect(scenarioFromForm(form({ ...base, startArgs: "  " })).startArgs).toBeUndefined();
+  });
+
+  it("rejects a scenario with both a host and an app", () => {
+    expect(() =>
+      scenarioFromForm(form({ ...base, targetHost: "example.com", targetApp: "desktop-demo" })),
+    ).toThrow(expect.objectContaining({ code: "hostAndApp" }));
+  });
+
+  it("rejects an app id with invalid characters", () => {
+    const run = () => scenarioFromForm(form({ ...base, targetApp: "my app" }));
+
+    expect(run).toThrow(ScenarioValidationError);
+    expect(run).toThrow(expect.objectContaining({ code: "invalidAppId" }));
+  });
+
+  it("rejects an invalid window title regex", () => {
+    expect(() =>
+      scenarioFromForm(
+        form({ ...base, assertionType: "window_title_matches", assertionValue: "Export (" }),
+      ),
+    ).toThrow(expect.objectContaining({ code: "invalidRegex", params: { value: "Export (" } }));
+  });
+});
+
+describe("matchesTarget", () => {
+  const web = { kind: "web" as const, url: "https://app.example.com/start" };
+  const desktop = { kind: "desktop" as const, appId: "desktop-demo" };
+
+  it("matches generic scenarios on every target", () => {
+    expect(matchesTarget({}, web)).toBe(true);
+    expect(matchesTarget({}, desktop)).toBe(true);
+  });
+
+  it("matches host scenarios only on web targets of that host", () => {
+    expect(matchesTarget({ targetHost: "example.com" }, web)).toBe(true);
+    expect(matchesTarget({ targetHost: "other.com" }, web)).toBe(false);
+    expect(matchesTarget({ targetHost: "example.com" }, desktop)).toBe(false);
+  });
+
+  it("matches app scenarios only on that desktop app", () => {
+    expect(matchesTarget({ targetApp: "desktop-demo" }, desktop)).toBe(true);
+    expect(matchesTarget({ targetApp: "other-app" }, desktop)).toBe(false);
+    expect(matchesTarget({ targetApp: "desktop-demo" }, web)).toBe(false);
+  });
+});
+
+describe("assertionAppliesTo", () => {
+  it("limits url and window title checks to their target kind", () => {
+    expect(assertionAppliesTo("url_contains", "web")).toBe(true);
+    expect(assertionAppliesTo("url_contains", "desktop")).toBe(false);
+    expect(assertionAppliesTo("window_title_matches", "desktop")).toBe(true);
+    expect(assertionAppliesTo("window_title_matches", "web")).toBe(false);
+  });
+
+  it("checks visible text on both target kinds", () => {
+    expect(assertionAppliesTo("text_visible", "web")).toBe(true);
+    expect(assertionAppliesTo("text_visible", "desktop")).toBe(true);
   });
 });

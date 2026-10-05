@@ -9,7 +9,7 @@ import {
   buildCellPlan,
   EXPLORE_SCENARIO,
   isPersonaAssigned,
-  matchesTargetHost,
+  matchesTarget,
   type Scenario,
 } from "@/lib/scenario-model";
 import styles from "./page.module.css";
@@ -18,7 +18,7 @@ type RunFormProps = {
   action: (formData: FormData) => Promise<void>;
   defaultReportLanguage: Locale;
   personas: { id: string; name: string }[];
-  scenarios: Pick<Scenario, "id" | "title" | "targetHost" | "allowSubmit" | "personas">[];
+  scenarios: Pick<Scenario, "id" | "title" | "targetHost" | "targetApp" | "allowSubmit" | "personas">[];
 };
 
 export function RunForm({ action, defaultReportLanguage, personas, scenarios }: RunFormProps) {
@@ -32,8 +32,9 @@ export function RunForm({ action, defaultReportLanguage, personas, scenarios }: 
   );
 
   const allScenarios = [EXPLORE_SCENARIO, ...scenarios];
-  const matching = allScenarios.filter((scenario) => matchesTargetHost(scenario, url));
-  const others = allScenarios.filter((scenario) => !matchesTargetHost(scenario, url));
+  const target = { kind: "web" as const, url };
+  const matching = allScenarios.filter((scenario) => matchesTarget(scenario, target));
+  const others = allScenarios.filter((scenario) => !matchesTarget(scenario, target));
   const personaNames = new Map(personas.map((persona) => [persona.id, persona.name]));
   const chosenScenarios = allScenarios.filter((scenario) => selectedScenarios.has(scenario.id));
   const cellCount = buildCellPlan([...selectedPersonas], chosenScenarios).length;
@@ -72,8 +73,8 @@ export function RunForm({ action, defaultReportLanguage, personas, scenarios }: 
       <span>
         {scenario.id === EXPLORE_SCENARIO.id ? t.scenarios.explore : scenario.title}
       </span>
-      {scenario.targetHost ? (
-        <span className={styles.choiceHint}>{scenario.targetHost}</span>
+      {scenario.targetHost || scenario.targetApp ? (
+        <span className={styles.choiceHint}>{scenario.targetHost ?? scenario.targetApp}</span>
       ) : null}
       {scenario.personas?.length ? (
         <span className={styles.choiceHint}>

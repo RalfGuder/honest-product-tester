@@ -1,6 +1,7 @@
 import matter from "gray-matter";
 
 import {
+  APP_ID_PATTERN,
   DEFAULT_MAX_STEPS,
   EXPLORE_SCENARIO_ID,
   MAX_STEPS_LIMIT,
@@ -22,6 +23,9 @@ export type ScenarioErrorCode =
   | "titleWithoutSlug"
   | "reservedId"
   | "invalidHost"
+  | "invalidAppId"
+  | "hostAndApp"
+  | "invalidRegex"
   | "alreadyExists";
 
 /** A user-facing validation error; the UI translates it by `code`. The message stays English. */
@@ -42,6 +46,8 @@ type ScenarioFrontmatter = {
   success_criteria?: unknown;
   target_host?: unknown;
   start_path?: unknown;
+  target_app?: unknown;
+  start_args?: unknown;
   login?: unknown;
   allow_submit?: unknown;
   max_steps?: unknown;
@@ -60,6 +66,8 @@ export function parseScenario(raw: string, fallbackId: string): Scenario {
     successCriteria: asText(frontmatter.success_criteria),
     targetHost: asText(frontmatter.target_host) || undefined,
     startPath: asText(frontmatter.start_path) || undefined,
+    targetApp: asText(frontmatter.target_app) || undefined,
+    startArgs: asTextList(frontmatter.start_args),
     login: asLoginMode(frontmatter.login),
     allowSubmit: frontmatter.allow_submit === true,
     maxSteps: asMaxSteps(frontmatter.max_steps),
@@ -81,6 +89,14 @@ export function serializeScenario(scenario: Scenario) {
 
   if (scenario.startPath) {
     frontmatter.start_path = scenario.startPath;
+  }
+
+  if (scenario.targetApp) {
+    frontmatter.target_app = scenario.targetApp;
+  }
+
+  if (scenario.startArgs?.length) {
+    frontmatter.start_args = [...scenario.startArgs];
   }
 
   frontmatter.login = scenario.login;
@@ -136,23 +152,41 @@ export function scenarioFromForm(formData: FormData): Scenario {
     );
   }
 
+  const targetHost = normalizeHost(formText(formData, "targetHost"));
+  const targetApp = normalizeAppId(formText(formData, "targetApp"));
+
+  if (targetHost && targetApp) {
+    throw new ScenarioValidationError(
+      "hostAndApp",
+      "A scenario targets either a website host or a desktop app, not both.",
+    );
+  }
+
   const assertionTypes = formData.getAll("assertionType").map(String);
   const assertionValues = formData.getAll("assertionValue").map(String);
+  const assertions = asAssertions(
+    assertionTypes.map((type, index) => ({ type, value: assertionValues[index] ?? "" })),
+  );
+
+  assertions
+    .filter((assertion) => assertion.type === "window_title_matches")
+    .forEach(({ value }) => assertRegex(value));
 
   return {
     id,
     title,
     mission,
     successCriteria,
-    targetHost: normalizeHost(formText(formData, "targetHost")),
+    targetHost,
     startPath: normalizeStartPath(formText(formData, "startPath")),
+    targetApp,
+    // One argument per line, so arguments may contain spaces.
+    startArgs: asTextList(formText(formData, "startArgs").split(/\r?\n/)),
     login: asLoginMode(formText(formData, "login")),
     allowSubmit: formData.get("allowSubmit") === "on",
     maxSteps: asMaxSteps(Number.parseInt(formText(formData, "maxSteps"), 10)),
     personas: asIdList(formData.getAll("assignedPersona")),
-    assertions: asAssertions(
-      assertionTypes.map((type, index) => ({ type, value: assertionValues[index] ?? "" })),
-    ),
+    assertions,
   };
 }
 
@@ -171,6 +205,34 @@ function normalizeHost(value: string) {
     return new URL(value.includes("://") ? value : `https://${value}`).hostname.toLowerCase();
   } catch {
     throw new ScenarioValidationError("invalidHost", `"${value}" is not a valid host.`, { value });
+  }
+}
+
+function normalizeAppId(value: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  const appId = value.toLowerCase();
+
+  if (!APP_ID_PATTERN.test(appId)) {
+    throw new ScenarioValidationError("invalidAppId", `"${value}" is not a valid app id.`, {
+      value,
+    });
+  }
+
+  return appId;
+}
+
+function assertRegex(value: string) {
+  try {
+    new RegExp(value);
+  } catch {
+    throw new ScenarioValidationError(
+      "invalidRegex",
+      `"${value}" is not a valid regular expression.`,
+      { value },
+    );
   }
 }
 
@@ -206,6 +268,13 @@ function asIdList(value: unknown) {
   }
 
   return [...new Set(value.map(asText).filter(Boolean))];
+}
+
+// Keeps order and duplicates: command line arguments may repeat. Empty lists are left out.
+function asTextList(value: unknown) {
+  const items = Array.isArray(value) ? value.map(asText).filter(Boolean) : [];
+
+  return items.length > 0 ? items : undefined;
 }
 
 function asAssertions(value: unknown): ScenarioAssertion[] {

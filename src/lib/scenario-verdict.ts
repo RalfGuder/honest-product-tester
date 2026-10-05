@@ -17,11 +17,16 @@ const SELF_VERDICTS: readonly Verdict[] = ["passed", "failed", "gave_up", "limit
 
 export type AssertionResult = ScenarioAssertion & {
   passed: boolean;
+  // The assertion does not fit the run's target kind (e.g. url_contains on a desktop app).
+  notApplicable?: boolean;
   detail?: string;
 };
 
 export type CellEvidence = {
   finalUrl?: string;
+  // Desktop targets: title of the active window at the end and all open windows.
+  finalWindow?: string;
+  openWindows?: string[];
   quote?: string;
 };
 
@@ -54,8 +59,10 @@ export type CellReport = {
  */
 export function reconcileVerdict(
   selfVerdict: Verdict,
-  assertionResults: AssertionResult[],
+  allAssertionResults: AssertionResult[],
 ): { verdict: Verdict; misjudged: boolean } {
+  const assertionResults = allAssertionResults.filter((result) => !result.notApplicable);
+
   if (
     assertionResults.length === 0 ||
     selfVerdict === "error" ||
@@ -107,6 +114,10 @@ export function parseCellReport(rawText: string): ParsedCellReport {
 
   if (typeof evidence.finalUrl === "string" && evidence.finalUrl.trim()) {
     result.finalUrl = evidence.finalUrl.trim();
+  }
+
+  if (typeof evidence.finalWindow === "string" && evidence.finalWindow.trim()) {
+    result.finalWindow = evidence.finalWindow.trim();
   }
 
   if (typeof evidence.quote === "string" && evidence.quote.trim()) {

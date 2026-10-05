@@ -98,6 +98,7 @@ export const de: Dictionary = {
     assertionTypes: {
       url_contains: "End-URL enthält",
       text_visible: "Seite zeigt Text",
+      window_title_matches: "Fenstertitel passt zu (Regex)",
     },
     remove: "Entfernen",
     addAssertion: "Assertion hinzufügen",
@@ -111,6 +112,9 @@ export const de: Dictionary = {
     titleWithoutSlug: "Der Titel muss mindestens einen Buchstaben oder eine Ziffer enthalten.",
     reservedId: "„{id}“ ist für die eingebaute freie Erkundung reserviert.",
     invalidHost: "„{value}“ ist kein gültiger Host.",
+    invalidAppId: "Die App-ID „{value}“ ist ungültig (nur a–z, 0–9 und Bindestriche).",
+    hostAndApp: "Ein Szenario zielt entweder auf einen Website-Host oder auf eine Desktop-App, nicht auf beides.",
+    invalidRegex: "„{value}“ ist kein gültiger regulärer Ausdruck.",
     alreadyExists: "Ein Szenario mit der ID „{id}“ existiert bereits.",
     saveFailed: "Das Szenario konnte nicht gespeichert werden.",
   },
@@ -148,6 +152,8 @@ export const de: Dictionary = {
     assertions: "Assertions",
     urlContains: "URL enthält",
     showsText: "Zeigt Text",
+    windowTitleMatches: "Fenstertitel passt zu",
+    notApplicable: "für dieses Ziel nicht anwendbar",
   },
   cellStatus: {
     queued: "wartet",

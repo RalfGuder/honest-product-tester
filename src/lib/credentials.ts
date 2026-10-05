@@ -17,6 +17,26 @@ export type PersonaLogin = {
   loggedInSelector?: string;
 };
 
+export type DesktopLogin = {
+  appId: string;
+  username: string;
+  password: string;
+  // Selectors for agent-wpf: AutomationId, Name or @ref of the login dialog's controls.
+  usernameField: string;
+  passwordField: string;
+  submit: string;
+  // Title (or part of it) of the window that only opens after a successful login.
+  loggedInWindow?: string;
+};
+
+type CredentialsApp = {
+  usernameField?: string;
+  passwordField?: string;
+  submit?: string;
+  loggedInWindow?: string;
+  personas?: Record<string, { username?: string; password?: string }>;
+};
+
 type CredentialsSite = {
   loginUrl?: string;
   // Shared HTTP Basic Auth gate in front of the site (e.g. a staging proxy).
@@ -30,9 +50,13 @@ type CredentialsSite = {
 };
 
 // Either one site at the top level (original format) or a list of sites, one per host.
+// Desktop app logins live in their own block, keyed by app id.
 export type CredentialsFile = CredentialsSite & {
   sites?: CredentialsSite[];
+  desktop?: Record<string, CredentialsApp>;
 };
+
+export type DesktopLoginResult = { kind: "none" } | { kind: "login"; login: DesktopLogin };
 
 export type PersonaLoginResult =
   | { kind: "none" }
@@ -124,6 +148,11 @@ function hostDistance(loginUrl: string, targetUrl: string) {
 }
 
 function getSites(file: CredentialsFile): CredentialsSite[] {
+  // A file with only desktop logins has no website login at all.
+  if (!file.sites && !file.loginUrl && file.desktop) {
+    return [];
+  }
+
   const sites = file.sites ?? [file];
 
   sites.forEach((site, index) => {
@@ -149,6 +178,11 @@ export function selectPersonaLogin(
   targetUrl: string,
 ): PersonaLoginResult {
   const sites = getSites(file);
+
+  if (sites.length === 0) {
+    return { kind: "none" };
+  }
+
   const site = sites
     .filter((candidate) => loginAppliesTo(candidate.loginUrl!, targetUrl))
     .sort(
@@ -191,6 +225,55 @@ export function selectPersonaLogin(
       loggedInSelector: site.loggedInSelector,
     },
   };
+}
+
+/** Returns the persona's login for a desktop app; none when the app has no login block. */
+export function selectDesktopLogin(
+  file: CredentialsFile,
+  personaId: string,
+  appId: string,
+): DesktopLoginResult {
+  const app = file.desktop?.[appId];
+
+  if (!app) {
+    return { kind: "none" };
+  }
+
+  assertUniqueUsernames(app.personas, appId);
+
+  if (!app.usernameField || !app.passwordField || !app.submit) {
+    throw new Error(
+      `Desktop login for ${appId} needs usernameField, passwordField and submit.`,
+    );
+  }
+
+  const entry = app.personas?.[personaId];
+
+  if (!entry?.username || !entry.password) {
+    throw new Error(`No login configured for persona ${personaId} in ${appId}.`);
+  }
+
+  return {
+    kind: "login",
+    login: {
+      appId,
+      username: entry.username,
+      password: entry.password,
+      usernameField: app.usernameField,
+      passwordField: app.passwordField,
+      submit: app.submit,
+      loggedInWindow: app.loggedInWindow,
+    },
+  };
+}
+
+/** Like getPersonaLogin, for a desktop app from the allowlist. */
+export async function getDesktopLogin(
+  personaId: string,
+  appId: string,
+): Promise<DesktopLoginResult> {
+  const file = await readCredentialsFile();
+  return file ? selectDesktopLogin(file, personaId, appId) : { kind: "none" };
 }
 
 /**

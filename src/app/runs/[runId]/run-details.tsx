@@ -17,6 +17,7 @@ import { LOCALE_NAMES } from "@/i18n/config";
 import type { Dictionary } from "@/i18n/dictionaries/en";
 import { renderLiveText } from "@/i18n/live";
 import { useI18n } from "@/i18n/provider";
+import { describeTarget } from "@/lib/run-target";
 import { REPORT_INSIGHT_DEFINITIONS } from "@/lib/report-insights";
 import type { CellRunRecord, RunManifest } from "@/lib/runs";
 import { EXPLORE_SCENARIO, EXPLORE_SCENARIO_ID } from "@/lib/scenario-model";
@@ -139,7 +140,7 @@ export function RunDetails({ initialRun }: RunDetailsProps) {
             {t.common.back}
           </Link>
           <div className={styles.runMeta}>
-            <span className={styles.runUrl}>{format(t.run.uxTesting, { url: run.manifest.url })}</span>
+            <span className={styles.runUrl}>{format(t.run.uxTesting, { url: describeTarget(run.manifest.target) })}</span>
             {run.manifest.reportLanguage ? (
               <span className={styles.runFacts}>
                 {format(t.run.reportLanguage, {
@@ -452,9 +453,10 @@ function CellReportView({ report }: { report: CellReport }) {
           <ul className={styles.frictionList}>
             {report.assertionResults.map((result) => (
               <li key={`${result.type}-${result.value}`} title={result.detail}>
-                {result.passed ? "✅" : "❌"}{" "}
-                {result.type === "url_contains" ? t.run.urlContains : t.run.showsText} &quot;
+                {result.notApplicable ? "➖" : result.passed ? "✅" : "❌"}{" "}
+                {ASSERTION_LABELS[result.type](t)} &quot;
                 {result.value}&quot;
+                {result.notApplicable ? ` (${t.run.notApplicable})` : null}
               </li>
             ))}
           </ul>
@@ -463,6 +465,12 @@ function CellReportView({ report }: { report: CellReport }) {
     </div>
   );
 }
+
+const ASSERTION_LABELS: Record<CellReport["assertionResults"][number]["type"], (t: Dictionary) => string> = {
+  url_contains: (t) => t.run.urlContains,
+  text_visible: (t) => t.run.showsText,
+  window_title_matches: (t) => t.run.windowTitleMatches,
+};
 
 function StatusBadge({ status }: { status: CellRunRecord["status"] }) {
   const { t } = useI18n();
