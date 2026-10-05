@@ -99,6 +99,7 @@ export const en = {
     assertionTypes: {
       url_contains: "Final URL contains",
       text_visible: "Page shows text",
+      window_title_matches: "Window title matches (regex)",
     },
     remove: "Remove",
     addAssertion: "Add assertion",
@@ -112,6 +113,9 @@ export const en = {
     titleWithoutSlug: "The title must contain at least one letter or digit.",
     reservedId: "\"{id}\" is reserved for the built-in free exploration.",
     invalidHost: "\"{value}\" is not a valid host.",
+    invalidAppId: "\"{value}\" is not a valid app id (only a–z, 0–9 and hyphens).",
+    hostAndApp: "A scenario targets either a website host or a desktop app, not both.",
+    invalidRegex: "\"{value}\" is not a valid regular expression.",
     alreadyExists: "A scenario with the id \"{id}\" already exists.",
     saveFailed: "Saving the scenario failed.",
   },
@@ -149,6 +153,8 @@ export const en = {
     assertions: "Assertions",
     urlContains: "URL contains",
     showsText: "Shows text",
+    windowTitleMatches: "Window title matches",
+    notApplicable: "not applicable to this target",
   },
   cellStatus: {
     queued: "queued",

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { loginAppliesTo, selectPersonaLogin, type CredentialsFile } from "@/lib/credentials";
+import {
+  loginAppliesTo,
+  selectDesktopLogin,
+  selectPersonaLogin,
+  type CredentialsFile,
+} from "@/lib/credentials";
 
 describe("loginAppliesTo", () => {
   const loginUrl = "https://staging.example.com/login";
@@ -143,5 +148,69 @@ describe("selectPersonaLogin", () => {
     expect(() => selectPersonaLogin({ sites: [{ personas: {} }] }, "alice", "https://a.test/")).toThrow(
       "Credentials site #1 is missing loginUrl.",
     );
+  });
+});
+
+describe("selectDesktopLogin", () => {
+  const app = {
+    usernameField: "UsernameBox",
+    passwordField: "PasswordBox",
+    submit: "LoginButton",
+    loggedInWindow: "Start",
+    personas: {
+      alice: { username: "alice", password: "pw-a" },
+      bob: { username: "bob", password: "pw-b" },
+    },
+  };
+  const file: CredentialsFile = { desktop: { "desktop-demo": app } };
+
+  it("returns the persona's login for the app", () => {
+    expect(selectDesktopLogin(file, "alice", "desktop-demo")).toEqual({
+      kind: "login",
+      login: {
+        appId: "desktop-demo",
+        username: "alice",
+        password: "pw-a",
+        usernameField: "UsernameBox",
+        passwordField: "PasswordBox",
+        submit: "LoginButton",
+        loggedInWindow: "Start",
+      },
+    });
+  });
+
+  it("returns none for an app without a login block", () => {
+    expect(selectDesktopLogin(file, "alice", "other-app")).toEqual({ kind: "none" });
+  });
+
+  it("fails when the persona has no login for the app", () => {
+    expect(() => selectDesktopLogin(file, "carol", "desktop-demo")).toThrow(
+      "No login configured for persona carol in desktop-demo.",
+    );
+  });
+
+  it("fails when two personas share an account", () => {
+    const shared: CredentialsFile = {
+      desktop: {
+        "desktop-demo": {
+          ...app,
+          personas: { alice: app.personas.alice, bob: { username: "ALICE", password: "x" } },
+        },
+      },
+    };
+
+    expect(() => selectDesktopLogin(shared, "alice", "desktop-demo")).toThrow(/same login/);
+  });
+
+  it("fails when the login dialog selectors are missing", () => {
+    const incomplete: CredentialsFile = {
+      desktop: { "desktop-demo": { ...app, submit: undefined } },
+    };
+
+    expect(() => selectDesktopLogin(incomplete, "alice", "desktop-demo")).toThrow(/submit/);
+  });
+
+  it("treats a file with only desktop logins as having no website login", () => {
+    expect(selectPersonaLogin(file, "alice", "https://example.com/")).toEqual({ kind: "none" });
   });
 });

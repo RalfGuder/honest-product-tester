@@ -1,0 +1,11 @@
+{
+  "apps": [
+    {
+      "id": "desktop-demo",
+      "name": "Desktop Demo",
+      "exePath": "D:\source\repos\honest-product-tester\fixtures\desktop-demo\bin\Release\net8.0-windows\DesktopDemo.exe",
+      "defaultArgs": ["--lang", "de"],
+      "workingDir": "D:\source\repos\honest-product-tester\fixtures\desktop-demo\bin\Release\net8.0-windows"
+    }
+  ]
+}

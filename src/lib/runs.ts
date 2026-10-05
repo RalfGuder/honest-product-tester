@@ -5,6 +5,8 @@ import type { Locale } from "@/i18n/config";
 import { getDictionary } from "@/i18n/dictionaries";
 import type { LiveText } from "@/i18n/live";
 import { buildQueuedReportMarkdown } from "@/lib/report-markdown";
+import { getDesktopApp } from "@/lib/desktop-apps";
+import type { DesktopTarget, RunTarget, RunTargetInput } from "@/lib/run-target";
 import { comparePersonaIds, Persona } from "@/lib/personas";
 import type { PersonaReportInsight } from "@/lib/report-insights";
 import {
@@ -16,6 +18,8 @@ import {
 import type { CellReport } from "@/lib/scenario-verdict";
 import { queueWrite } from "@/lib/write-queue";
 
+export type { DesktopTarget, RunTarget, RunTargetInput, WebTarget } from "@/lib/run-target";
+
 type OrchestrationMode = "sequential" | "parallel";
 
 export type RunStatus = "queued" | "running" | "completed" | "failed";
@@ -23,7 +27,7 @@ export type CellRunStatus = "queued" | "running" | "completed" | "failed" | "ski
 
 export type RunManifest = {
   id: string;
-  url: string;
+  target: RunTarget;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -83,13 +87,12 @@ export function getRunScenarios(manifest: RunManifest) {
 }
 
 export async function createRun(
-  url: string,
+  targetInput: RunTargetInput,
   personas: Persona[],
   scenarios: Scenario[],
   reportLanguage?: Locale,
 ) {
-  const trimmedUrl = url.trim();
-  const parsedUrl = validatePublicUrl(trimmedUrl);
+  const target = await resolveTarget(targetInput);
 
   if (personas.length === 0) {
     throw new Error("Select at least one persona.");
@@ -115,7 +118,7 @@ export async function createRun(
 
   const manifest: RunManifest = {
     id: runId,
-    url: parsedUrl.href,
+    target,
     createdAt: new Date().toISOString(),
     status: "queued",
     orchestration: "parallel",
@@ -281,7 +284,18 @@ async function exists(filePath: string) {
 
 async function readManifest(runId: string) {
   const manifestPath = path.join(runsDir, runId, "manifest.json");
-  return JSON.parse(await fs.readFile(manifestPath, "utf8")) as RunManifest;
+  return upgradeManifest(JSON.parse(await fs.readFile(manifestPath, "utf8")));
+}
+
+/** Runs created before desktop targets existed only stored the website URL. */
+export function upgradeManifest(raw: RunManifest | (Omit<RunManifest, "target"> & { url: string })) {
+  if ("target" in raw && raw.target) {
+    return raw as RunManifest;
+  }
+
+  const { url, ...rest } = raw as Omit<RunManifest, "target"> & { url: string };
+
+  return { ...rest, target: { kind: "web", url } } satisfies RunManifest;
 }
 
 async function writeManifest(runId: string, manifest: RunManifest) {
@@ -341,6 +355,31 @@ function createRunId() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const suffix = Math.random().toString(36).slice(2, 8);
   return `run-${timestamp}-${suffix}`;
+}
+
+async function resolveTarget(input: RunTargetInput): Promise<RunTarget> {
+  if (input.kind === "web") {
+    return { kind: "web", url: validatePublicUrl(input.url.trim()).href };
+  }
+
+  return validateDesktopTarget(input.appId);
+}
+
+async function validateDesktopTarget(appId: string): Promise<DesktopTarget> {
+  const app = await getDesktopApp(appId.trim());
+
+  if (!app) {
+    throw new Error(`Desktop app "${appId}" is not in the allowlist.`);
+  }
+
+  return {
+    kind: "desktop",
+    appId: app.id,
+    appName: app.name,
+    exePath: app.exePath,
+    args: app.defaultArgs,
+    workingDir: app.workingDir,
+  };
 }
 
 function validatePublicUrl(rawUrl: string) {

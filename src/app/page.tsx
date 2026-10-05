@@ -36,10 +36,11 @@ export default async function Home() {
             action={startRunAction}
             defaultReportLanguage={locale}
             personas={personas.map(({ id, name }) => ({ id, name }))}
-            scenarios={scenarios.map(({ id, title, targetHost, allowSubmit, personas: assigned }) => ({
+            scenarios={scenarios.map(({ id, title, targetHost, targetApp, allowSubmit, personas: assigned }) => ({
               id,
               title,
               targetHost,
+              targetApp,
               allowSubmit,
               personas: assigned,
             }))}

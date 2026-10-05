@@ -23,6 +23,7 @@ import {
   getRunScenarios,
   getScreenshotDir,
   updateCellRecord,
+  type WebTarget,
   updateRunManifest,
   writeCellRawOutput,
   writeCellReport,
@@ -35,14 +36,17 @@ import {
 } from "@/lib/report-insights";
 import {
   EXPLORE_SCENARIO_ID,
+  assertionAppliesTo,
   isPersonaAssigned,
   resolveStartUrl,
   type Scenario,
+  type ScenarioAssertion,
 } from "@/lib/scenario-format";
 import {
   createStepBudget,
   parseCellReport,
   reconcileVerdict,
+  type AssertionResult,
   type CellReport,
   type ParsedCellReport,
   type StepBudget,
@@ -94,6 +98,18 @@ async function executeRun(runId: string) {
     .map((personaId) => personas.find((item) => item.id === personaId))
     .filter((persona): persona is Persona => Boolean(persona));
 
+  if (manifest.target.kind !== "web") {
+    await updateRunManifest(runId, (current) => ({
+      ...current,
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      error: "Desktop targets are not supported yet.",
+    }));
+    return;
+  }
+
+  const target = manifest.target;
+
   await updateRunManifest(runId, (current) => ({
     ...current,
     status: "running",
@@ -103,7 +119,7 @@ async function executeRun(runId: string) {
   // Personas run in parallel; each persona works through its scenarios one after another.
   const results = await Promise.allSettled(
     runPersonas.map((persona) =>
-      runPersonaScenarios(runId, manifest.url, persona, scenarios, manifest.reportLanguage),
+      runPersonaScenarios(runId, target, persona, scenarios, manifest.reportLanguage),
     ),
   );
   const failures = results.filter(
@@ -130,7 +146,7 @@ async function executeRun(runId: string) {
 
 async function runPersonaScenarios(
   runId: string,
-  url: string,
+  target: WebTarget,
   persona: Persona,
   scenarios: Scenario[],
   reportLanguage: Locale | undefined,
@@ -139,7 +155,7 @@ async function runPersonaScenarios(
 
   for (const scenario of scenarios.filter((item) => isPersonaAssigned(item, persona.id))) {
     try {
-      await runCell(runId, url, persona, scenario, reportLanguage);
+      await runCell(runId, target, persona, scenario, reportLanguage);
     } catch (error) {
       errors.push(
         `${persona.name} / ${scenario.title}: ${error instanceof Error ? error.message : "unknown failure"}`,
@@ -154,16 +170,15 @@ async function runPersonaScenarios(
 
 async function runCell(
   runId: string,
-  url: string,
+  target: WebTarget,
   persona: Persona,
   scenario: Scenario,
   reportLanguage: Locale | undefined,
 ) {
   const cellId = getCellId(persona.id, scenario.id);
   const isExplore = scenario.id === EXPLORE_SCENARIO_ID;
-  const startUrl = resolveStartUrl(url, scenario.startPath);
   const screenshotDir = getScreenshotDir(runId);
-  const driver = createWebDriver({ cellId, runId, screenshotDir, startUrl });
+  const driver = createCellDriver(target, scenario, { cellId, runId, screenshotDir });
   const reportTitle = isExplore ? persona.name : `${persona.name} – ${scenario.title}`;
   // Report files are written in the run's report language; runs without one stay English.
   const reportDictionary = getDictionary(reportLanguage ?? "en");
@@ -453,16 +468,20 @@ async function evaluateMission({
   }
 
   // Without a readable report only the assertions can still judge the outcome.
-  if (!report.ok && !parsed && scenario.assertions.length === 0) {
+  if (
+    !report.ok &&
+    !parsed &&
+    !scenario.assertions.some((assertion) => assertionAppliesTo(assertion.type, driver.kind))
+  ) {
     throw unreadableReportError(report.error, cellId);
   }
 
   const finalUrl = await driver.readFinalLocation().catch(() => undefined);
-  const assertionResults = await driver.checkAssertions(scenario.assertions, finalUrl);
+  const assertionResults = await checkApplicableAssertions(driver, scenario.assertions, finalUrl);
   const { verdict, misjudged } = parsed
     ? reconcileVerdict(parsed.selfVerdict, assertionResults)
     : {
-        verdict: assertionResults.every((result) => result.passed)
+        verdict: assertionResults.every((result) => result.passed || result.notApplicable)
           ? ("passed" as const)
           : ("failed" as const),
         misjudged: false,
@@ -484,6 +503,31 @@ async function evaluateMission({
       ? budgetNote(control, budget.exhausted, scenario.maxSteps)
       : liveNote({ key: "reportUnreadable" })),
   };
+}
+
+/** Checks the assertions that fit the driver's target; the others are only listed. */
+async function checkApplicableAssertions(
+  driver: TargetDriver,
+  assertions: ScenarioAssertion[],
+  finalLocation: string | undefined,
+): Promise<AssertionResult[]> {
+  const applicable = assertions.filter((assertion) =>
+    assertionAppliesTo(assertion.type, driver.kind),
+  );
+  const checked = await driver.checkAssertions(applicable, finalLocation);
+
+  return assertions.map(
+    (assertion) =>
+      checked[applicable.indexOf(assertion)] ?? { ...assertion, passed: false, notApplicable: true },
+  );
+}
+
+function createCellDriver(
+  target: WebTarget,
+  scenario: Scenario,
+  cell: { cellId: string; runId: string; screenshotDir: string },
+) {
+  return createWebDriver({ ...cell, startUrl: resolveStartUrl(target.url, scenario.startPath) });
 }
 
 function unreadableReportError(error: Error, cellId: string) {

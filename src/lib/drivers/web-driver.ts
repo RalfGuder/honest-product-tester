@@ -51,6 +51,7 @@ export function createWebDriver({
   const browserSession = getBrowserSessionName(runId, cellId);
 
   return {
+    kind: "web",
     resolveLogin: (persona, scenario) => resolveCellLogin(persona, scenario, startUrl),
     // agent-browser starts its daemon with the first command, nothing to launch up front.
     start: async () => {},

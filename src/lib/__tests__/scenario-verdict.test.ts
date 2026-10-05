@@ -55,6 +55,29 @@ describe("reconcileVerdict", () => {
   });
 });
 
+describe("reconcileVerdict with not applicable assertions", () => {
+  const notApplicable: AssertionResult = {
+    type: "window_title_matches",
+    value: "Done",
+    passed: false,
+    notApplicable: true,
+  };
+
+  it("ignores assertions that do not fit the target", () => {
+    expect(reconcileVerdict("passed", [pass(), notApplicable])).toEqual({
+      verdict: "passed",
+      misjudged: false,
+    });
+  });
+
+  it("keeps the self verdict when no assertion applies", () => {
+    expect(reconcileVerdict("gave_up", [notApplicable])).toEqual({
+      verdict: "gave_up",
+      misjudged: false,
+    });
+  });
+});
+
 describe("parseCellReport", () => {
   it("parses a complete report wrapped in prose", () => {
     const raw = `Here you go:
@@ -111,5 +134,15 @@ describe("createStepBudget", () => {
     budget.tryConsume();
 
     expect(budget.blocked).toBe(2);
+  });
+});
+
+describe("parseCellReport desktop evidence", () => {
+  it("reads the final window title", () => {
+    const report = parseCellReport(
+      JSON.stringify({ verdict: "passed", evidence: { finalWindow: " Export complete " } }),
+    );
+
+    expect(report.evidence).toEqual({ finalWindow: "Export complete" });
   });
 });

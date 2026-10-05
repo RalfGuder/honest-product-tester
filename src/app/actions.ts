@@ -20,7 +20,7 @@ export async function startRunAction(formData: FormData) {
   ).filter((scenario): scenario is Scenario => Boolean(scenario));
   const reportLanguageValue = formData.get("reportLanguage");
   const reportLanguage = isLocale(reportLanguageValue) ? reportLanguageValue : await getLocale();
-  const run = await createRun(url, personas, scenarios, reportLanguage);
+  const run = await createRun({ kind: "web", url }, personas, scenarios, reportLanguage);
   ensureRunStarted(run.id);
 
   redirect(`/runs/${run.id}`);
